@@ -1,6 +1,6 @@
 module github.com/conbench/conbench
 
-go 1.26.1
+go 1.26.6
 
 require (
 	github.com/coreos/go-oidc/v3 v3.18.0
