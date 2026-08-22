@@ -214,6 +214,9 @@ func inspectLegacyHandoff(ctx context.Context, conn *pgx.Conn) (legacyHandoff, e
 		case legacyBaselineRevision:
 			return baselineLegacyHandoff, nil
 		case legacySubmissionRevision:
+			if err := validateLegacySubmissionData(ctx, conn); err != nil {
+				return noLegacyHandoff, err
+			}
 			return submissionLegacyHandoff, nil
 		}
 	}
@@ -222,6 +225,27 @@ func inspectLegacyHandoff(ctx context.Context, conn *pgx.Conn) (legacyHandoff, e
 		strings.Join(revisions, ", "),
 		legacyBaselineRevision+", "+legacySubmissionRevision,
 	)
+}
+
+func validateLegacySubmissionData(ctx context.Context, conn *pgx.Conn) error {
+	var invalid bool
+	if err := conn.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM public.benchmark_result
+			WHERE submission_key IS NOT NULL
+			  AND (
+				submission_payload_sha256 IS NULL
+				OR submission_payload_sha256 !~ '^[0-9a-f]{64}$'
+			  )
+		)
+	`).Scan(&invalid); err != nil {
+		return fmt.Errorf("inspect legacy submission idempotency data: %w", err)
+	}
+	if invalid {
+		return errors.New("legacy schema contains invalid submission idempotency data; repair keyed rows before migration")
+	}
+	return nil
 }
 
 func prepareLegacyHandoff(
@@ -237,13 +261,10 @@ func prepareLegacyHandoff(
 		return fmt.Errorf("read legacy handoff version: %w", err)
 	}
 	if version == migratedb.NilVersion {
-		if err := seedLegacyVersion(driver, handoff); err != nil {
+		if err := seedLegacyVersion(driver); err != nil {
 			return err
 		}
 		version = 1
-		if handoff == submissionLegacyHandoff {
-			version = 2
-		}
 	}
 	if version > latest {
 		return fmt.Errorf("legacy handoff migration version %d is newer than this binary (expects %d)", version, latest)
@@ -252,11 +273,8 @@ func prepareLegacyHandoff(
 		if version != 2 {
 			return fmt.Errorf("legacy handoff has unsupported dirty migration version %d", version)
 		}
-		if err := migrator.Force(2); err != nil {
+		if err := migrator.Force(1); err != nil {
 			return fmt.Errorf("reset interrupted legacy handoff: %w", err)
-		}
-		if err := migrator.Steps(-1); err != nil {
-			return fmt.Errorf("clean interrupted legacy handoff: %w", err)
 		}
 		return nil
 	}
@@ -276,8 +294,8 @@ func prepareLegacyHandoff(
 			} else if !errors.Is(err, errSubmissionSchemaIncomplete) {
 				return fmt.Errorf("inspect legacy submission schema: %w", err)
 			}
-			if err := migrator.Steps(-1); err != nil {
-				return fmt.Errorf("normalize legacy submission schema: %w", err)
+			if err := migrator.Force(1); err != nil {
+				return fmt.Errorf("prepare legacy submission schema upgrade: %w", err)
 			}
 		default:
 			return fmt.Errorf("legacy submission handoff has invalid migration version %d", version)
@@ -286,13 +304,9 @@ func prepareLegacyHandoff(
 	return nil
 }
 
-func seedLegacyVersion(driver migratedb.Driver, handoff legacyHandoff) error {
-	version := 1
-	if handoff == submissionLegacyHandoff {
-		version = 2
-	}
-	if err := driver.SetVersion(version, false); err != nil {
-		return fmt.Errorf("seed legacy migration version %d: %w", version, err)
+func seedLegacyVersion(driver migratedb.Driver) error {
+	if err := driver.SetVersion(1, false); err != nil {
+		return fmt.Errorf("seed legacy migration version 1: %w", err)
 	}
 	return nil
 }

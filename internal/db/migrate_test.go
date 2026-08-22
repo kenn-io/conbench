@@ -40,12 +40,6 @@ func TestMigrateNormalizesLegacySubmissionRevision(t *testing.T) {
 	pool, ctx := dbtest.NewEmptyPool(t)
 	applyInitialSchema(t, ctx, pool)
 	applyLegacySubmissionSchema(t, ctx, pool)
-	createLegacyRevision(t, ctx, pool, "a6b7c8d9e0f1")
-
-	require.NoError(t, db.Migrate(ctx, pool))
-	assertCurrentMigration(t, ctx, pool)
-	assertLegacyLedgerRemoved(t, ctx, pool)
-
 	insertBenchmarkDependencies(t, ctx, pool)
 	_, err := pool.Exec(ctx, `
 		INSERT INTO public.benchmark_result (
@@ -54,7 +48,25 @@ func TestMigrateNormalizesLegacySubmissionRevision(t *testing.T) {
 			submission_key, submission_payload_sha256
 		) VALUES (
 			'result-1', 'case-1', 'context-1', 'info-1', 'hardware-1', 'run-1', '{}',
-			now(), 'repo', 'fingerprint', 'key-without-hash', NULL
+			now(), 'repo', 'fingerprint', 'legacy-key', repeat('a', 64)
+		)
+	`)
+	require.NoError(t, err)
+	createLegacyRevision(t, ctx, pool, "a6b7c8d9e0f1")
+
+	require.NoError(t, db.Migrate(ctx, pool))
+	assertCurrentMigration(t, ctx, pool)
+	assertLegacyLedgerRemoved(t, ctx, pool)
+	assertSubmissionIdentity(t, ctx, pool, "result-1", "legacy-key", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+
+	_, err = pool.Exec(ctx, `
+		INSERT INTO public.benchmark_result (
+			id, case_id, context_id, info_id, hardware_id, run_id, run_tags,
+			"timestamp", commit_repo_url, history_fingerprint,
+			submission_key, submission_payload_sha256
+		) VALUES (
+			'result-2', 'case-1', 'context-1', 'info-1', 'hardware-1', 'run-2', '{}',
+			now(), 'repo', 'fingerprint-2', 'key-without-hash', NULL
 		)
 	`)
 	require.Error(t, err, "the current constraint must reject a keyed result without a payload hash")
@@ -112,7 +124,7 @@ func TestMigrateResumesDirtyLegacyHandoff(t *testing.T) {
 			submission_key, submission_payload_sha256
 		) VALUES (
 			'result-1', 'case-1', 'context-1', 'info-1', 'hardware-1', 'run-1', '{}',
-			now(), 'repo', 'fingerprint', 'legacy-key-without-hash', NULL
+			now(), 'repo', 'fingerprint', 'legacy-key', repeat('b', 64)
 		)
 	`)
 	require.NoError(t, err)
@@ -121,6 +133,39 @@ func TestMigrateResumesDirtyLegacyHandoff(t *testing.T) {
 	require.NoError(t, db.Migrate(ctx, pool))
 	assertCurrentMigration(t, ctx, pool)
 	assertLegacyLedgerRemoved(t, ctx, pool)
+	assertSubmissionIdentity(t, ctx, pool, "result-1", "legacy-key", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+}
+
+func TestMigrateRejectsInvalidLegacySubmissionIdentityWithoutMutation(t *testing.T) {
+	pool, ctx := dbtest.NewEmptyPool(t)
+	applyInitialSchema(t, ctx, pool)
+	applyLegacySubmissionSchema(t, ctx, pool)
+	insertBenchmarkDependencies(t, ctx, pool)
+	_, err := pool.Exec(ctx, `
+		INSERT INTO public.benchmark_result (
+			id, case_id, context_id, info_id, hardware_id, run_id, run_tags,
+			"timestamp", commit_repo_url, history_fingerprint,
+			submission_key, submission_payload_sha256
+		) VALUES (
+			'result-1', 'case-1', 'context-1', 'info-1', 'hardware-1', 'run-1', '{}',
+			now(), 'repo', 'fingerprint', 'legacy-key-without-hash', NULL
+		)
+	`)
+	require.NoError(t, err)
+	createLegacyRevision(t, ctx, pool, "a6b7c8d9e0f1")
+
+	err = db.Migrate(ctx, pool)
+	require.ErrorContains(t, err, "invalid submission idempotency data")
+	assertTableMissing(t, ctx, pool, "schema_migrations")
+	var key string
+	var hashIsNull bool
+	require.NoError(t, pool.QueryRow(ctx, `
+		SELECT submission_key, submission_payload_sha256 IS NULL
+		FROM public.benchmark_result
+		WHERE id = 'result-1'
+	`).Scan(&key, &hashIsNull))
+	assert.Equal(t, "legacy-key-without-hash", key)
+	assert.True(t, hashIsNull)
 }
 
 func TestMigrateRejectsUnmarkedExistingDatabase(t *testing.T) {
@@ -300,6 +345,25 @@ func assertCurrentMigration(t *testing.T, ctx context.Context, pool *pgxpool.Poo
 func assertLegacyLedgerRemoved(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 	t.Helper()
 	assertTableMissing(t, ctx, pool, "alembic_version")
+}
+
+func assertSubmissionIdentity(
+	t *testing.T,
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	resultID string,
+	wantKey string,
+	wantHash string,
+) {
+	t.Helper()
+	var key, hash string
+	require.NoError(t, pool.QueryRow(ctx, `
+		SELECT submission_key, submission_payload_sha256
+		FROM public.benchmark_result
+		WHERE id = $1
+	`, resultID).Scan(&key, &hash))
+	assert.Equal(t, wantKey, key)
+	assert.Equal(t, wantHash, hash)
 }
 
 func assertTableMissing(t *testing.T, ctx context.Context, pool *pgxpool.Pool, table string) {
