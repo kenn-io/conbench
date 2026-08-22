@@ -250,7 +250,7 @@ function metadataValue(value: unknown): string {
   if (value === null || typeof value === "number" || typeof value === "boolean") {
     return String(value);
   }
-  return JSON.stringify(value);
+  return JSON.stringify(value) ?? String(value);
 }
 
 function boundaryMetadata(p: SeriesPoint): string[] {
