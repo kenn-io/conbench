@@ -37,28 +37,16 @@ func TestMigrateAdoptsLegacyBaselineRevision(t *testing.T) {
 	assertLegacyLedgerRemoved(t, ctx, pool)
 }
 
-func TestMigrateRejectsLegacySubmissionRevisionWithKeyedRowsWithoutMutation(t *testing.T) {
+func TestMigrateRejectsLegacySubmissionRevisionWithoutMutation(t *testing.T) {
 	pool, ctx := dbtest.NewEmptyPool(t)
 	applyInitialSchema(t, ctx, pool)
 	applyLegacySubmissionSchema(t, ctx, pool)
-	insertBenchmarkDependencies(t, ctx, pool)
-	_, err := pool.Exec(ctx, `
-		INSERT INTO public.benchmark_result (
-			id, case_id, context_id, info_id, hardware_id, run_id, run_tags,
-			"timestamp", commit_repo_url, history_fingerprint,
-			submission_key, submission_payload_sha256
-		) VALUES (
-			'result-1', 'case-1', 'context-1', 'info-1', 'hardware-1', 'run-1', '{}',
-			now(), 'repo', 'fingerprint', 'legacy-key', repeat('a', 64)
-		)
-	`)
-	require.NoError(t, err)
 	createLegacyRevision(t, ctx, pool, "a6b7c8d9e0f1")
 
-	err = db.Migrate(ctx, pool)
-	require.ErrorContains(t, err, "cannot be safely replayed")
+	err := db.Migrate(ctx, pool)
+	require.ErrorContains(t, err, "unsupported legacy revision")
+	require.ErrorContains(t, err, "a6b7c8d9e0f1")
 	assertTableMissing(t, ctx, pool, "schema_migrations")
-	assertSubmissionIdentity(t, ctx, pool, "result-1", "legacy-key", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 	var legacyLedgerExists bool
 	require.NoError(t, pool.QueryRow(ctx, `
 		SELECT to_regclass('public.alembic_version') IS NOT NULL
@@ -169,12 +157,7 @@ func migrateWhileRetryingSubmission(
 func TestMigrateSerializesConcurrentLegacyHandoff(t *testing.T) {
 	pool, ctx := dbtest.NewEmptyPool(t)
 	applyInitialSchema(t, ctx, pool)
-	applyLegacySubmissionSchema(t, ctx, pool)
-	createLegacyRevision(t, ctx, pool, "a6b7c8d9e0f1")
-	var indexOIDBefore int64
-	require.NoError(t, pool.QueryRow(ctx, `
-		SELECT 'public.benchmark_result_submission_key_index'::regclass::oid::bigint
-	`).Scan(&indexOIDBefore))
+	createLegacyRevision(t, ctx, pool, "9d5f3c1a7b2e")
 
 	const callers = 8
 	start := make(chan struct{})
@@ -195,18 +178,12 @@ func TestMigrateSerializesConcurrentLegacyHandoff(t *testing.T) {
 	}
 	assertCurrentMigration(t, ctx, pool)
 	assertLegacyLedgerRemoved(t, ctx, pool)
-	var indexOIDAfter int64
-	require.NoError(t, pool.QueryRow(ctx, `
-		SELECT 'public.benchmark_result_submission_key_index'::regclass::oid::bigint
-	`).Scan(&indexOIDAfter))
-	assert.Equal(t, indexOIDBefore, indexOIDAfter, "an existing correct index must be preserved")
 }
 
 func TestMigrateResumesEmptyMixedLegacyHandoff(t *testing.T) {
 	pool, ctx := dbtest.NewEmptyPool(t)
 	applyInitialSchema(t, ctx, pool)
-	applyLegacySubmissionSchema(t, ctx, pool)
-	createLegacyRevision(t, ctx, pool, "a6b7c8d9e0f1")
+	createLegacyRevision(t, ctx, pool, "9d5f3c1a7b2e")
 	createEmptyMigrationLedger(t, ctx, pool)
 
 	require.NoError(t, db.Migrate(ctx, pool))
@@ -217,8 +194,7 @@ func TestMigrateResumesEmptyMixedLegacyHandoff(t *testing.T) {
 func TestMigrateResumesDirtyLegacyHandoff(t *testing.T) {
 	pool, ctx := dbtest.NewEmptyPool(t)
 	applyInitialSchema(t, ctx, pool)
-	applyLegacySubmissionSchema(t, ctx, pool)
-	createLegacyRevision(t, ctx, pool, "a6b7c8d9e0f1")
+	createLegacyRevision(t, ctx, pool, "9d5f3c1a7b2e")
 	createMigrationLedger(t, ctx, pool, 2, true)
 
 	require.NoError(t, db.Migrate(ctx, pool))
@@ -273,14 +249,20 @@ func TestMigrateRejectsNewerVersion(t *testing.T) {
 	require.ErrorContains(t, err, "version 99 is newer than this binary")
 }
 
-func TestMigrateCompletesMixedSchemaOwnershipHandoff(t *testing.T) {
+func TestMigrateRejectsLegacySubmissionRevisionAlongsideCurrentLedger(t *testing.T) {
 	pool, ctx := dbtest.NewEmptyPool(t)
 	require.NoError(t, db.Migrate(ctx, pool))
 	createLegacyRevision(t, ctx, pool, "a6b7c8d9e0f1")
 
-	require.NoError(t, db.Migrate(ctx, pool))
+	err := db.Migrate(ctx, pool)
+	require.ErrorContains(t, err, "unsupported legacy revision")
+	require.ErrorContains(t, err, "a6b7c8d9e0f1")
 	assertCurrentMigration(t, ctx, pool)
-	assertLegacyLedgerRemoved(t, ctx, pool)
+	var legacyLedgerExists bool
+	require.NoError(t, pool.QueryRow(ctx, `
+		SELECT to_regclass('public.alembic_version') IS NOT NULL
+	`).Scan(&legacyLedgerExists))
+	assert.True(t, legacyLedgerExists)
 }
 
 func TestMigrateRejectsSubmissionIndexDriftAtCurrentVersion(t *testing.T) {
@@ -436,25 +418,6 @@ func assertCurrentMigration(t *testing.T, ctx context.Context, pool *pgxpool.Poo
 func assertLegacyLedgerRemoved(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 	t.Helper()
 	assertTableMissing(t, ctx, pool, "alembic_version")
-}
-
-func assertSubmissionIdentity(
-	t *testing.T,
-	ctx context.Context,
-	pool *pgxpool.Pool,
-	resultID string,
-	wantKey string,
-	wantHash string,
-) {
-	t.Helper()
-	var key, hash string
-	require.NoError(t, pool.QueryRow(ctx, `
-		SELECT submission_key, submission_payload_sha256
-		FROM public.benchmark_result
-		WHERE id = $1
-	`, resultID).Scan(&key, &hash))
-	assert.Equal(t, wantKey, key)
-	assert.Equal(t, wantHash, hash)
 }
 
 func assertTableMissing(t *testing.T, ctx context.Context, pool *pgxpool.Pool, table string) {

@@ -22,7 +22,6 @@ import (
 
 const (
 	legacyBaselineRevision   = "9d5f3c1a7b2e"
-	legacySubmissionRevision = "a6b7c8d9e0f1"
 	migrationTableName       = "schema_migrations"
 	migrationHandoffLockID   = int64(0x636f6e62656e6368)
 	submissionIndexName      = "benchmark_result_submission_key_index"
@@ -39,13 +38,12 @@ type legacyHandoff int
 const (
 	noLegacyHandoff legacyHandoff = iota
 	baselineLegacyHandoff
-	submissionLegacyHandoff
 )
 
 // Migrate advances the database through the numbered SQL migrations embedded
 // in this binary. golang-migrate owns ordering, its advisory lock, and the
-// version/dirty-state ledger. Go only recognizes the two exact schema markers
-// needed to hand existing pre-Go databases to that migration history.
+// version/dirty-state ledger. Go only recognizes the exact schema marker needed
+// to hand an existing pre-Go database to that migration history.
 func Migrate(ctx context.Context, pool *pgxpool.Pool) (returnErr error) {
 	lockConn, err := acquireMigrationLock(ctx, pool)
 	if err != nil {
@@ -101,7 +99,7 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) (returnErr error) {
 	}
 
 	if handoff != noLegacyHandoff {
-		if err := prepareLegacyHandoff(ctx, lockConn.Conn(), databaseDriver, migrator, handoff, latest); err != nil {
+		if err := prepareLegacyHandoff(databaseDriver, migrator, latest); err != nil {
 			return err
 		}
 	}
@@ -336,47 +334,20 @@ func inspectLegacyHandoff(ctx context.Context, conn *pgx.Conn) (legacyHandoff, e
 		return noLegacyHandoff, fmt.Errorf("read legacy schema revision: %w", err)
 	}
 	if len(revisions) == 1 {
-		switch revisions[0] {
-		case legacyBaselineRevision:
+		if revisions[0] == legacyBaselineRevision {
 			return baselineLegacyHandoff, nil
-		case legacySubmissionRevision:
-			if err := validateLegacySubmissionCutover(ctx, conn); err != nil {
-				return noLegacyHandoff, err
-			}
-			return submissionLegacyHandoff, nil
 		}
 	}
 	return noLegacyHandoff, fmt.Errorf(
-		"existing database has unsupported legacy revision %q; supported cutover revisions are %s",
+		"existing database has unsupported legacy revision %q; supported cutover revision is %s",
 		strings.Join(revisions, ", "),
-		legacyBaselineRevision+", "+legacySubmissionRevision,
+		legacyBaselineRevision,
 	)
 }
 
-func validateLegacySubmissionCutover(ctx context.Context, conn *pgx.Conn) error {
-	var legacyIdentityRows bool
-	if err := conn.QueryRow(ctx, `
-		SELECT EXISTS (
-			SELECT 1
-			FROM public.benchmark_result
-			WHERE submission_key IS NOT NULL
-			   OR submission_payload_sha256 IS NOT NULL
-		)
-	`).Scan(&legacyIdentityRows); err != nil {
-		return fmt.Errorf("inspect legacy submission idempotency data: %w", err)
-	}
-	if legacyIdentityRows {
-		return errors.New("legacy schema contains submission idempotency data that cannot be safely replayed; restore a supported pre-idempotency backup or use retained original inputs with a fresh database")
-	}
-	return nil
-}
-
 func prepareLegacyHandoff(
-	ctx context.Context,
-	conn *pgx.Conn,
 	driver migratedb.Driver,
 	migrator *migrate.Migrate,
-	handoff legacyHandoff,
 	latest int,
 ) error {
 	version, dirty, err := driver.Version()
@@ -402,27 +373,8 @@ func prepareLegacyHandoff(
 		return nil
 	}
 
-	switch handoff {
-	case baselineLegacyHandoff:
-		if version < 1 {
-			return fmt.Errorf("legacy baseline handoff has invalid migration version %d", version)
-		}
-	case submissionLegacyHandoff:
-		switch version {
-		case 1:
-			return nil
-		case 2:
-			if err := verifyCurrentSchema(ctx, conn); err == nil {
-				return nil
-			} else if !errors.Is(err, errSubmissionSchemaIncomplete) {
-				return fmt.Errorf("inspect legacy submission schema: %w", err)
-			}
-			if err := migrator.Force(1); err != nil {
-				return fmt.Errorf("prepare legacy submission schema upgrade: %w", err)
-			}
-		default:
-			return fmt.Errorf("legacy submission handoff has invalid migration version %d", version)
-		}
+	if version < 1 {
+		return fmt.Errorf("legacy baseline handoff has invalid migration version %d", version)
 	}
 	return nil
 }
