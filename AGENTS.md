@@ -18,6 +18,11 @@ in kata (project `conbench`).
 
 ## Agent workflow
 
+- Treat `conbench/conbench` as read-only. Never push branches, open pull
+  requests or issues, post comments, or otherwise mutate that repository.
+  Until an operator explicitly changes this rule, `kenn-io/conbench` is the
+  only writable remote and pull-request target; the upstream remote may be
+  used only for fetching and reading.
 - Commit repository changes before ending the turn unless the user explicitly
   asks not to commit. Keep unrelated user changes out of commits; stage only
   the paths you changed for the task.

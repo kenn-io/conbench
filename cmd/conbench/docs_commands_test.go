@@ -63,7 +63,6 @@ func documentedConbenchCommandSources(t *testing.T) []string {
 	root := filepath.Join("..", "..")
 	sources := []string{
 		filepath.Join(root, "README.md"),
-		filepath.Join(root, "sdk", "python", "README.md"),
 	}
 	for _, pattern := range []string{
 		filepath.Join(root, "docs", "site", "*.md"),

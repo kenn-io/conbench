@@ -233,35 +233,6 @@ run_cli_compare() {
 	json_probe_line "CLI" "conbench compare" "compare" true "" >>"$jsonl"
 }
 
-run_sdk_smoke() {
-	local result_id="$1"
-	local fingerprint="$2"
-	local baseline_id="$3"
-	local contender_id="$4"
-	local jsonl="$5"
-	local rc
-
-	set +e
-	(
-		cd sdk/python || exit 1
-		CONBENCH_SERVER_URL="$BASE_URL" \
-			CONBENCH_RESULT_ID="$result_id" \
-			CONBENCH_HISTORY_FINGERPRINT="$fingerprint" \
-			CONBENCH_BASELINE_RESULT_ID="$baseline_id" \
-			CONBENCH_CONTENDER_RESULT_ID="$contender_id" \
-			uv run pytest -q tests/test_smoke.py >/dev/null
-	)
-	rc="$?"
-	set -e
-
-	if [ "$rc" -ne 0 ]; then
-		json_probe_line "SDK" "pytest sdk smoke" "uv run pytest -q tests/test_smoke.py" false "command exited ${rc}" >>"$jsonl"
-		FAILURES=1
-		return
-	fi
-	json_probe_line "SDK" "pytest sdk smoke" "uv run pytest -q tests/test_smoke.py" true "" >>"$jsonl"
-}
-
 selected_result_sample() {
 	jq -r '
 		def category(name): .categories[name] // {};
@@ -362,14 +333,6 @@ else
 fi
 finalize_probe_artifact "$BASE_URL" "$CLI_JSONL" "${OUT_DIR}/cli-probes.json"
 rm -f "$CLI_JSONL"
-
-SDK_JSONL="${OUT_DIR}/sdk-smoke.jsonl"
-prepare_private_file "$SDK_JSONL"
-
-echo "==> Python SDK smoke"
-run_sdk_smoke "$RESULT_ID" "$HISTORY_FINGERPRINT" "$BASELINE_RESULT_ID" "$CONTENDER_RESULT_ID" "$SDK_JSONL"
-finalize_probe_artifact "$BASE_URL" "$SDK_JSONL" "${OUT_DIR}/sdk-smoke.json"
-rm -f "$SDK_JSONL"
 
 if [ "$PROFILE" -eq 1 ]; then
 	echo "==> profile read paths"

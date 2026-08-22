@@ -63,7 +63,7 @@ Run Go tests:
 make go-test
 ```
 
-Run the generated-client and schema drift gates:
+Run the generated-client and query-code drift gates:
 
 ```bash
 make codegen-check
@@ -95,21 +95,16 @@ target defaults to `127.0.0.1:18080` to avoid common local development
 conflicts; override `SERVER_CONTAINER_SMOKE_HOST_PORT` and
 `SERVER_CONTAINER_SMOKE_URL` together if needed.
 
-`Dockerfile.schema` and `docker-compose.schema.yml` remain temporarily for
-Alembic/schema tooling. They install only `requirements-schema.txt`, not the
-legacy Flask application dependency stack.
+The same image also runs schema upgrades through `conbench migrate`; there is no
+separate schema runtime.
 
 ## CI And Releases
 
 The active GitHub Actions CI workflow is `.github/workflows/ci.yml`. It runs the
-Go, web, generated SDK, docs, schema/codegen drift, container, deploy-manifest,
+Go, web, generated clients, docs, codegen drift, container, deploy-manifest,
 and e2e gates for the new Go/Svelte implementation.
 
-The PyPI release workflow publishes only the generated Python SDK from
-`sdk/python` as the `conbench` package. Release builds stamp a date/run-based
-SDK version before packaging so uploaded artifacts supersede the retired legacy
-`conbench` package line and do not reuse a static development version. Legacy
-package publishing is retired for the maintained release path. `benchadapt`,
+Python package publishing is retired for the maintained release path. `benchadapt`,
 `benchclients`, `benchconnect`, `benchrun`, `benchalerts`,
 `legacy/conbenchlegacy`, and the legacy Flask `conbench/` app package have been
 deleted after their cutover decisions.
@@ -128,19 +123,15 @@ a single CLI login flow behind the Service.
 
 ## Kubernetes Deploy Manifests
 
-Kubernetes deployments use two images for now:
-
-- `conbench-server`, built from `Dockerfile.server`, is the server image. It
-  runs `conbench serve` with the embedded Svelte app on port 8080.
-- `conbench-schema`, built from `Dockerfile.schema`, runs Alembic migrations
-  against the frozen schema with only the temporary schema dependency set.
+Kubernetes deployments use one image, built from `Dockerfile.server`. The
+migration Job runs `conbench migrate`; the serving Deployment runs
+`conbench serve` with the embedded Svelte app on port 8080.
 
 The serving Deployment runs two replicas, uses `/api/ping` startup, liveness,
 and readiness probes, and the Service targets the `http` container port.
 `/api/ping` is a process-health endpoint rather than a database query, so
 liveness does not restart pods during transient database pressure. The
-migration Job intentionally keeps using the schema image until schema ownership
-moves out of the legacy Python/Alembic path.
+migration Job must complete before the serving Deployment rolls forward.
 
 The Go server requires `CONBENCH_DB_URL`; the deploy manifest renderer can
 derive it from legacy `DB_*` fields for the transition period. Those `DB_*`

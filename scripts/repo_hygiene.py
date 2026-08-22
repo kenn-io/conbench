@@ -101,10 +101,7 @@ RETIRED_ROOT_FILES: tuple[str, ...] = (
 )
 
 ALLOWED_PYTHON_PREFIXES: tuple[str, ...] = (
-    "examples/migration/",
-    "migrations/",
     "scripts/",
-    "sdk/python/",
 )
 
 ALLOWED_DOCS_PREFIXES: tuple[str, ...] = (

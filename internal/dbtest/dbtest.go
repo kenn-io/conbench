@@ -24,6 +24,14 @@ import (
 // the pool and container, and skips when Docker is not reachable or under
 // `go test -short`.
 func NewPool(t *testing.T) (*pgxpool.Pool, context.Context) {
+	pool, ctx := NewEmptyPool(t)
+	require.NoError(t, db.Migrate(ctx, pool), "apply schema")
+	return pool, ctx
+}
+
+// NewEmptyPool starts an ephemeral Postgres without applying the Conbench
+// schema. Migration tests use it to exercise first-install behavior.
+func NewEmptyPool(t *testing.T) (*pgxpool.Pool, context.Context) {
 	t.Helper()
 	if testing.Short() {
 		t.Skip("skipping Postgres-backed test in -short mode")
@@ -47,8 +55,6 @@ func NewPool(t *testing.T) (*pgxpool.Pool, context.Context) {
 	require.NoError(t, err, "open pool")
 	t.Cleanup(pool.Close)
 
-	_, err = pool.Exec(ctx, db.SchemaSQL)
-	require.NoError(t, err, "apply schema")
 	return pool, ctx
 }
 

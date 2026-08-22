@@ -113,15 +113,13 @@ git pull --ff-only
 make build
 ```
 
-For AWS Kubernetes evaluation, build and push immutable images from
-`Dockerfile.server` and `Dockerfile.schema`. Use the commit SHA or release
-version as the image tag. Do not deploy mutable `latest` or `dev` tags to the
-shared evaluation environment.
+For AWS Kubernetes evaluation, build and push an immutable image from
+`Dockerfile.server`. Use the commit SHA or release version as the image tag. Do
+not deploy mutable `latest` or `dev` tags to the shared evaluation environment.
 
-The v2 server image runs `conbench serve` with the embedded Svelte app on port
-8080. The schema image is only for Alembic ownership of the frozen schema; do
-not run schema initialization or migrations against production RDS during the
-read-only UI evaluation.
+The image runs `conbench serve` with the embedded Svelte app on port 8080 and
+`conbench migrate` in the migration Job. Do not run schema initialization or
+migrations against production RDS during the read-only UI evaluation.
 
 Keep generated docs screenshots and prod-clone artifacts off the server unless
 they are part of a deliberate review bundle.

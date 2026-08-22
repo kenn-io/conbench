@@ -357,7 +357,7 @@ def main(argv: list[str]) -> int:
         print(f"generated screenshots OK ({verified} non-dashboard)")
         return 0
 
-    paths = [Path(arg) for arg in argv[1:]] or [Path("docs/site"), Path("README.md"), Path("sdk/python/README.md")]
+    paths = [Path(arg) for arg in argv[1:]] or [Path("docs/site"), Path("README.md")]
     try:
         count = validate_docs_links(paths)
         nav_count = validate_zensical_nav(Path("zensical.toml"))

@@ -6,11 +6,9 @@ package db
 
 import (
 	"time"
-)
 
-type AlembicVersion struct {
-	VersionNum string
-}
+	"github.com/jackc/pgx/v5/pgtype"
+)
 
 type AlertDelivery struct {
 	ID            string
@@ -127,6 +125,12 @@ type Commit struct {
 	Timestamp    *time.Time
 	Branch       *string
 	ForkPointSha *string
+}
+
+type ConbenchSchemaMigration struct {
+	Version   int64
+	Name      string
+	AppliedAt pgtype.Timestamptz
 }
 
 type Context struct {

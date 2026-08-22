@@ -1,4 +1,0 @@
-alembic
-psycopg2-binary
-requests
-SQLAlchemy>=2

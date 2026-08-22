@@ -1,7 +1,6 @@
 #!/bin/bash
 
 export CONBENCH_SERVER_IMAGE_NAME="${CONBENCH_SERVER_IMAGE_NAME:-conbench-server}"
-export CONBENCH_SCHEMA_IMAGE_NAME="${CONBENCH_SCHEMA_IMAGE_NAME:-conbench-schema}"
 if [[ -z "${CONBENCH_DEPLOY_VERSION:-}" ]]; then
   echo "CONBENCH_DEPLOY_VERSION must be set to the immutable image tag for this deployment" >&2
   if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
@@ -10,7 +9,6 @@ if [[ -z "${CONBENCH_DEPLOY_VERSION:-}" ]]; then
   exit 1
 fi
 export CONBENCH_SERVER_IMAGE_SPEC="${DOCKER_REGISTRY}/${CONBENCH_SERVER_IMAGE_NAME}:${CONBENCH_DEPLOY_VERSION}"
-export CONBENCH_SCHEMA_IMAGE_SPEC="${DOCKER_REGISTRY}/${CONBENCH_SCHEMA_IMAGE_NAME}:${CONBENCH_DEPLOY_VERSION}"
 export CONBENCH_ADDR="${CONBENCH_ADDR:-:8080}"
 
 # This script assumes that secrets have been injected via environment before
@@ -252,7 +250,7 @@ render_deployment_manifest() {
 }
 
 render_migration_manifest() {
-  render_template_from_env k8s/conbench-db-migration.templ.yml CONBENCH_SCHEMA_IMAGE_SPEC
+  render_template_from_env k8s/conbench-db-migration.templ.yml CONBENCH_SERVER_IMAGE_SPEC
 }
 
 render_ingress_manifest() {
@@ -285,14 +283,11 @@ apply_service_monitor_if_supported() {
 build_and_push() {
   set -x
   docker build -f Dockerfile.server -t "${CONBENCH_SERVER_IMAGE_NAME}" .
-  docker build -f Dockerfile.schema -t "${CONBENCH_SCHEMA_IMAGE_NAME}" .
   docker images | grep conbench
 
   docker tag "${CONBENCH_SERVER_IMAGE_NAME}:latest" "${CONBENCH_SERVER_IMAGE_SPEC}"
-  docker tag "${CONBENCH_SCHEMA_IMAGE_NAME}:latest" "${CONBENCH_SCHEMA_IMAGE_SPEC}"
   aws ecr get-login-password --region us-east-2 | docker login --username AWS --password-stdin "${DOCKER_REGISTRY}"
   docker push "${CONBENCH_SERVER_IMAGE_SPEC}"
-  docker push "${CONBENCH_SCHEMA_IMAGE_SPEC}"
 }
 
 deploy_secrets_and_config() {

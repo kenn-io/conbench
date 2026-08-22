@@ -15,13 +15,7 @@ class RepoHygieneTest(unittest.TestCase):
                 "cmd/conbench/main.go",
                 "api/openapi.yaml",
                 "scripts/docs_links.py",
-                "sdk/python/conbench/client.py",
-                "sdk/python/pyproject.toml",
-                "examples/migration/gbench_to_cli_submit.py",
-                "migrations/env.py",
-                "migrations/versions/afc565181834_initial_schema.py",
                 "requirements-docs.txt",
-                "requirements-schema.txt",
             ],
         )
 
@@ -138,19 +132,6 @@ class RepoHygieneTest(unittest.TestCase):
                 r"scripts/helper\.py:1: retired legacy import: benchconnect",
             ):
                 validate_repo_hygiene(root, tracked_files=["scripts/helper.py"])
-
-    def test_rejects_retired_from_import_in_allowed_python_root(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="conbench-repo-hygiene-") as tmp:
-            root = Path(tmp)
-            script = root / "sdk" / "python" / "helper.py"
-            script.parent.mkdir(parents=True)
-            script.write_text("from conbench_client.api import Client\n", encoding="utf-8")
-
-            with self.assertRaisesRegex(
-                RepoHygieneError,
-                r"sdk/python/helper\.py:1: retired legacy import: conbench_client",
-            ):
-                validate_repo_hygiene(root, tracked_files=["sdk/python/helper.py"])
 
     def test_cli_uses_git_tracked_files(self) -> None:
         from scripts.repo_hygiene import main

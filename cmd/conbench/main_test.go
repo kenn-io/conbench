@@ -206,6 +206,18 @@ func TestUsageErrorsUseCommandSpecificCobraUsage(t *testing.T) {
 	}
 }
 
+func TestMigrateRequiresDatabaseURL(t *testing.T) {
+	t.Setenv("CONBENCH_DB_URL", "")
+	t.Setenv("DATABASE_URL", "")
+	var stdout, stderr bytes.Buffer
+
+	code := run([]string{"migrate"}, &stdout, &stderr)
+
+	assert.Equal(t, 1, code)
+	assert.Empty(t, stdout.String())
+	assert.Contains(t, stderr.String(), "CONBENCH_DB_URL (or DATABASE_URL) is required")
+}
+
 func TestCobraHelpExitsZero(t *testing.T) {
 	tests := []struct {
 		name     string
