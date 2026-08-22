@@ -4,12 +4,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 const migrationLockID int64 = 0x436f6e62656e6368
+
+const (
+	legacyBaselineRevision   = "9d5f3c1a7b2e"
+	legacySubmissionRevision = "a6b7c8d9e0f1"
+)
 
 type migration struct {
 	version int64
@@ -18,7 +24,7 @@ type migration struct {
 }
 
 var migrations = []migration{
-	{version: 1, name: "go-schema-baseline"},
+	{version: 1, name: "go-schema-baseline", apply: finishLegacySchemaHandoff},
 	{version: 2, name: "submission-idempotency", apply: addSubmissionIdempotency},
 }
 
@@ -30,8 +36,10 @@ func MigrationCount() int {
 
 // Migrate brings a database to the schema version embedded in this binary.
 // A session advisory lock serializes migrators across deploy jobs. Existing
-// databases created by the retired schema tool are adopted at the baseline;
-// subsequent migrations are idempotent and recorded by version and name.
+// databases are adopted only when they have a Go migration ledger or an exact
+// supported legacy revision. Other states are rejected before anything is
+// modified. Subsequent migrations are idempotent and recorded by version and
+// name.
 func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 	conn, err := pool.Acquire(ctx)
 	if err != nil {
@@ -46,14 +54,19 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 		_, _ = conn.Exec(context.WithoutCancel(ctx), `SELECT pg_advisory_unlock($1)`, migrationLockID)
 	}()
 
-	var schemaExists bool
-	if err := conn.QueryRow(ctx, `SELECT to_regclass('public.benchmark_result') IS NOT NULL`).Scan(&schemaExists); err != nil {
+	var schemaExists, ledgerExists bool
+	if err := conn.QueryRow(ctx, `
+		SELECT to_regclass('public.benchmark_result') IS NOT NULL,
+		       to_regclass('public.conbench_schema_migration') IS NOT NULL
+	`).Scan(&schemaExists, &ledgerExists); err != nil {
 		return fmt.Errorf("inspect schema: %w", err)
 	}
 	if !schemaExists {
 		if _, err := conn.Exec(ctx, SchemaSQL); err != nil {
 			return fmt.Errorf("create schema: %w", err)
 		}
+	} else if err := verifyAdoptable(ctx, conn.Conn(), ledgerExists); err != nil {
+		return err
 	}
 
 	if _, err := conn.Exec(ctx, `
@@ -87,6 +100,47 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 		}
 	}
 	return nil
+}
+
+// verifyAdoptable decides whether a pre-existing database may be adopted at
+// the Go baseline. The Go ledger is the durable ownership marker. Before that
+// ledger existed, alembic_version recorded the two exact cutover states that
+// this binary knows how to advance. Unmarked and all other legacy databases
+// are rejected before the database is modified.
+func verifyAdoptable(ctx context.Context, conn *pgx.Conn, ledgerExists bool) error {
+	if ledgerExists {
+		return nil
+	}
+	var hasAlembic bool
+	if err := conn.QueryRow(ctx, `SELECT to_regclass('public.alembic_version') IS NOT NULL`).Scan(&hasAlembic); err != nil {
+		return fmt.Errorf("inspect legacy schema revision: %w", err)
+	}
+	if !hasAlembic {
+		return errors.New("existing database has no recognized schema revision; restore a supported database backup before running this migrator")
+	}
+	rows, err := conn.Query(ctx, `SELECT version_num FROM public.alembic_version`)
+	if err != nil {
+		return fmt.Errorf("read legacy schema revision: %w", err)
+	}
+	revisions, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return fmt.Errorf("read legacy schema revision: %w", err)
+	}
+	if len(revisions) == 1 {
+		switch revisions[0] {
+		case legacyBaselineRevision, legacySubmissionRevision:
+			return nil
+		}
+	}
+	return fmt.Errorf(
+		"existing database has unsupported legacy revision %q; supported cutover revisions are %s",
+		strings.Join(revisions, ", "), legacyBaselineRevision+", "+legacySubmissionRevision,
+	)
+}
+
+func finishLegacySchemaHandoff(ctx context.Context, conn *pgx.Conn) error {
+	_, err := conn.Exec(ctx, `DROP TABLE IF EXISTS public.alembic_version`)
+	return err
 }
 
 func migrationApplied(ctx context.Context, conn *pgx.Conn, m migration) (bool, error) {
