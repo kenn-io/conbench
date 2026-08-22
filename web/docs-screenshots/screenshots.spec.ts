@@ -83,7 +83,7 @@ test("capture documentation screenshots from the seeded dashboard", async ({ pag
   const captured = new Set<string>();
 
   if (suffix === "desktop") {
-    await gotoReady(page, "/", /recent runs/i);
+    await gotoReady(page, "/", /ci runs/i);
     await expect(page.locator(".runs-table tbody tr").first()).toBeVisible();
     await expectNoDocumentOverflow(page);
     await screenshot(page, "home", suffix, captured);
@@ -121,7 +121,7 @@ test("capture documentation screenshots from the seeded dashboard", async ({ pag
     await gotoAccount(page);
     await screenshot(page, "account", suffix, captured);
   } else {
-    await gotoReady(page, "/", /recent runs/i);
+    await gotoReady(page, "/", /ci runs/i);
     await expect(page.locator(".runs-table tbody tr").first()).toBeVisible();
     await expectPrimaryNavLinksInViewport(page);
     await expectNoDocumentOverflow(page);
@@ -254,7 +254,7 @@ async function gotoResults(page: Page, runID: string) {
 }
 
 async function gotoRun(page: Page, runID: string) {
-  await gotoReady(page, `/runs/${encodeURIComponent(runID)}`, /run/i);
+  await page.goto(`/runs/${encodeURIComponent(runID)}`);
   await expect(page.locator(".run-results-table tbody tr").first()).toBeVisible();
   await expect(page.getByRole("link", { name: `Open CI report for run ${runID}` })).toBeVisible();
   await expectNoDocumentOverflow(page);

@@ -104,9 +104,9 @@ Run these from the repository root:
 * `make go-test-short`: Runs the fast Go suite without Postgres-backed tests.
 * `make go-lint-ci`: Runs the Go lint gate.
 * `make codegen-check`: Regenerates OpenAPI and clients and fails on drift.
-* `make repo-hygiene-check`: Verifies retired Python app/package paths and
-  single-file module names stay untracked, and retired package imports stay out
-  of active Python files.
+* `make migration-history-check`: Rejects edits to shipped migrations,
+  duplicate numbers, missing up/down pairs, and—after the initial
+  bootstrap—multiple migrations per PR.
 * `make build-docs`: Builds the pinned Zensical docs site into `site/`.
 * `make e2e`: Runs the keystone end-to-end stack.
 * `make clean-local`: Removes generated local artifacts such as `bin/`,
@@ -122,9 +122,9 @@ The Go server exposes OpenAPI at `/openapi.yaml` and interactive docs at
 
 The Go binary owns schema installation and upgrades. Production deploys run the
 same image as the server with `conbench migrate` before starting the
-application. New installations use the embedded canonical schema; existing
-installations advance through ordered Go migrations recorded in
-`conbench_schema_migration`.
+application. New and existing installations advance through the same embedded,
+numbered SQL migrations. Go records the current version and dirty state in
+`schema_migrations`.
 
 ### To add new documentation pages
 

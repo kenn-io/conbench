@@ -56,6 +56,10 @@ Conventions:
   confirming first.
 - Before adding a backwards-compatibility shim, alias, or fallback wrapper, ask
   for express permission — these carry high maintenance cost.
+- Number schema migrations sequentially under `internal/db/migrations` with
+  matching `.up.sql` and `.down.sql` files. After the initial history
+  bootstrap, a pull request may add one migration and must never edit a
+  migration already present on its base.
 - No emojis in code or output.
 
 ### Testing

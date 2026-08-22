@@ -18,9 +18,9 @@ are not compatibility surfaces for the new implementation.
 6. Cut traffic over only after result counts and representative workflows agree.
 
 The existing Postgres data remains usable. Run `conbench migrate` with the new
-server image before starting the application; the Go migrator serializes
-schema changes and records completed revisions in
-`conbench_schema_migration`.
+server image before starting the application; the Go migrator serializes the
+embedded numbered SQL migrations and records their version and dirty state in
+`schema_migrations`.
 
 ## Result Submission
 

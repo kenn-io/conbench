@@ -22,7 +22,7 @@ truth; this table is the public deployment summary.
 | `CONBENCH_AUTH_DISABLED` | dev only | Set to `true` to disable write auth. Do not use in shared deployments. |
 | `GITHUB_API_TOKEN` | optional | Comma-separated GitHub token pool. Enables commit metadata fetch and asynchronous default-branch ancestry backfill. |
 | `CONBENCH_GITHUB_TIMEOUT` | optional | Go duration budget for in-request GitHub enrichment. Defaults to `5s`. |
-| `CONBENCH_INIT_SCHEMA` | dev only | Set to `true` to apply the embedded schema if missing. Do not point this at a production database. |
+| `CONBENCH_INIT_SCHEMA` | dev only | Set to `true` to apply embedded numbered migrations. Do not point this at a production database. |
 | `CONBENCH_SEED` | dev only | Set to `true` to seed deterministic demo data. |
 | `CONBENCH_SEED_DEV_TOKEN` | dev/e2e only | Seeds a user-owned API token for local/e2e authentication. The server logs only the token prefix. |
 

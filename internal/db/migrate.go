@@ -2,260 +2,278 @@ package db
 
 import (
 	"context"
+	"database/sql"
+	"embed"
 	"errors"
 	"fmt"
+	"io/fs"
+	"path"
+	"strconv"
 	"strings"
 
+	"github.com/golang-migrate/migrate/v4"
+	migratedb "github.com/golang-migrate/migrate/v4/database"
+	migratepgx "github.com/golang-migrate/migrate/v4/database/pgx/v5"
+	"github.com/golang-migrate/migrate/v4/source/iofs"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const migrationLockID int64 = 0x436f6e62656e6368
-
 const (
 	legacyBaselineRevision   = "9d5f3c1a7b2e"
 	legacySubmissionRevision = "a6b7c8d9e0f1"
+	migrationTableName       = "schema_migrations"
 )
 
-type migration struct {
-	version int64
-	name    string
-	apply   func(context.Context, *pgx.Conn) error
-}
+//go:embed migrations/*.sql
+var migrationFiles embed.FS
 
-var migrations = []migration{
-	{version: 1, name: "go-schema-baseline", apply: finishLegacySchemaHandoff},
-	{version: 2, name: "submission-idempotency", apply: addSubmissionIdempotency},
-}
+type legacyHandoff int
 
-// MigrationCount reports the number of schema revisions built into this
-// binary. It is primarily useful to operational status and integration tests.
-func MigrationCount() int {
-	return len(migrations)
-}
+const (
+	noLegacyHandoff legacyHandoff = iota
+	baselineLegacyHandoff
+	submissionLegacyHandoff
+)
 
-// Migrate brings a database to the schema version embedded in this binary.
-// A session advisory lock serializes migrators across deploy jobs. Existing
-// databases are adopted only when they have a Go migration ledger or an exact
-// supported legacy revision. Other states are rejected before anything is
-// modified. Subsequent migrations are idempotent and recorded by version and
-// name.
-func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
-	conn, err := pool.Acquire(ctx)
+// Migrate advances the database through the numbered SQL migrations embedded
+// in this binary. golang-migrate owns ordering, its advisory lock, and the
+// version/dirty-state ledger. Go only recognizes the two exact schema markers
+// needed to hand existing pre-Go databases to that migration history.
+func Migrate(ctx context.Context, pool *pgxpool.Pool) (returnErr error) {
+	handoff, err := inspectLegacyHandoff(ctx, pool)
 	if err != nil {
-		return fmt.Errorf("acquire migration connection: %w", err)
-	}
-	defer conn.Release()
-
-	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock($1)`, migrationLockID); err != nil {
-		return fmt.Errorf("acquire migration lock: %w", err)
-	}
-	defer func() {
-		_, _ = conn.Exec(context.WithoutCancel(ctx), `SELECT pg_advisory_unlock($1)`, migrationLockID)
-	}()
-
-	var schemaExists, ledgerExists bool
-	if err := conn.QueryRow(ctx, `
-		SELECT to_regclass('public.benchmark_result') IS NOT NULL,
-		       to_regclass('public.conbench_schema_migration') IS NOT NULL
-	`).Scan(&schemaExists, &ledgerExists); err != nil {
-		return fmt.Errorf("inspect schema: %w", err)
-	}
-	if !schemaExists {
-		if _, err := conn.Exec(ctx, SchemaSQL); err != nil {
-			return fmt.Errorf("create schema: %w", err)
-		}
-	} else if err := verifyAdoptable(ctx, conn.Conn(), ledgerExists); err != nil {
 		return err
 	}
 
-	if _, err := conn.Exec(ctx, `
-		CREATE TABLE IF NOT EXISTS public.conbench_schema_migration (
-			version bigint PRIMARY KEY,
-			name text NOT NULL,
-			applied_at timestamp with time zone DEFAULT now() NOT NULL
-		)
-	`); err != nil {
-		return fmt.Errorf("create migration ledger: %w", err)
+	sourceDriver, err := iofs.New(migrationFiles, "migrations")
+	if err != nil {
+		return fmt.Errorf("load embedded migrations: %w", err)
 	}
 
-	for _, m := range migrations {
-		applied, err := migrationApplied(ctx, conn.Conn(), m)
-		if err != nil {
+	sqlDB, err := sql.Open("pgx", pool.Config().ConnString())
+	if err != nil {
+		return fmt.Errorf("open migration database: %w", err)
+	}
+	sqlDB.SetMaxOpenConns(1)
+	if err := sqlDB.PingContext(ctx); err != nil {
+		_ = sqlDB.Close()
+		return fmt.Errorf("ping migration database: %w", err)
+	}
+
+	databaseDriver, err := migratepgx.WithInstance(sqlDB, &migratepgx.Config{
+		MigrationsTable:       migrationTableName,
+		MultiStatementEnabled: true,
+	})
+	if err != nil {
+		_ = sqlDB.Close()
+		return fmt.Errorf("open migration driver: %w", err)
+	}
+
+	migrator, err := migrate.NewWithInstance("iofs", sourceDriver, "pgx5", databaseDriver)
+	if err != nil {
+		_ = databaseDriver.Close()
+		_ = sourceDriver.Close()
+		return fmt.Errorf("create migrator: %w", err)
+	}
+	defer func() {
+		sourceErr, databaseErr := migrator.Close()
+		returnErr = errors.Join(returnErr, sourceErr, databaseErr)
+	}()
+
+	latest, err := latestMigrationVersion()
+	if err != nil {
+		return err
+	}
+
+	if handoff != noLegacyHandoff {
+		if err := seedLegacyVersion(databaseDriver, handoff); err != nil {
 			return err
 		}
-		if applied {
-			continue
-		}
-		if m.apply != nil {
-			if err := m.apply(ctx, conn.Conn()); err != nil {
-				return fmt.Errorf("apply migration %d (%s): %w", m.version, m.name, err)
+		if handoff == submissionLegacyHandoff {
+			if err := migrator.Steps(-1); err != nil {
+				return fmt.Errorf("normalize legacy submission schema: %w", err)
 			}
 		}
-		if _, err := conn.Exec(ctx,
-			`INSERT INTO public.conbench_schema_migration (version, name) VALUES ($1, $2)`,
-			m.version, m.name,
-		); err != nil {
-			return fmt.Errorf("record migration %d (%s): %w", m.version, m.name, err)
+	}
+
+	version, dirty, err := databaseDriver.Version()
+	if err != nil {
+		return fmt.Errorf("read migration version: %w", err)
+	}
+	if dirty {
+		return fmt.Errorf("database is in a dirty migration state at version %d", version)
+	}
+	if version > latest {
+		return fmt.Errorf(
+			"database schema version %d is newer than this binary (expects %d); upgrade Conbench",
+			version,
+			latest,
+		)
+	}
+
+	if err := migrator.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		return fmt.Errorf("apply migrations: %w", err)
+	}
+	version, dirty, err = databaseDriver.Version()
+	if err != nil {
+		return fmt.Errorf("read migration version after update: %w", err)
+	}
+	if dirty || version != latest {
+		return fmt.Errorf("database ended at migration version %d (dirty=%t), expected %d", version, dirty, latest)
+	}
+	if err := verifyCurrentSchema(ctx, pool); err != nil {
+		return fmt.Errorf("verify migrated schema: %w", err)
+	}
+	if handoff != noLegacyHandoff {
+		if _, err := pool.Exec(ctx, `DROP TABLE public.alembic_version`); err != nil {
+			return fmt.Errorf("finish legacy schema handoff: %w", err)
 		}
 	}
 	return nil
 }
 
-// verifyAdoptable decides whether a pre-existing database may be adopted at
-// the Go baseline. The Go ledger is the durable ownership marker. Before that
-// ledger existed, alembic_version recorded the two exact cutover states that
-// this binary knows how to advance. Unmarked and all other legacy databases
-// are rejected before the database is modified.
-func verifyAdoptable(ctx context.Context, conn *pgx.Conn, ledgerExists bool) error {
+func inspectLegacyHandoff(ctx context.Context, pool *pgxpool.Pool) (legacyHandoff, error) {
+	var schemaExists, ledgerExists, legacyLedgerExists bool
+	if err := pool.QueryRow(ctx, `
+		SELECT to_regclass('public.benchmark_result') IS NOT NULL,
+		       to_regclass('public.schema_migrations') IS NOT NULL,
+		       to_regclass('public.alembic_version') IS NOT NULL
+	`).Scan(&schemaExists, &ledgerExists, &legacyLedgerExists); err != nil {
+		return noLegacyHandoff, fmt.Errorf("inspect schema ownership: %w", err)
+	}
+
 	if ledgerExists {
-		return nil
+		if !schemaExists {
+			return noLegacyHandoff, errors.New("migration ledger exists without the Conbench schema")
+		}
+		if legacyLedgerExists {
+			return noLegacyHandoff, errors.New("database has both Go and legacy migration ledgers")
+		}
+		return noLegacyHandoff, nil
 	}
-	var hasAlembic bool
-	if err := conn.QueryRow(ctx, `SELECT to_regclass('public.alembic_version') IS NOT NULL`).Scan(&hasAlembic); err != nil {
-		return fmt.Errorf("inspect legacy schema revision: %w", err)
+	if !schemaExists {
+		if legacyLedgerExists {
+			return noLegacyHandoff, errors.New("legacy schema revision exists without the Conbench schema")
+		}
+		return noLegacyHandoff, nil
 	}
-	if !hasAlembic {
-		return errors.New("existing database has no recognized schema revision; restore a supported database backup before running this migrator")
+	if !legacyLedgerExists {
+		return noLegacyHandoff, errors.New("existing database has no recognized schema revision; restore a supported database backup before running this migrator")
 	}
-	rows, err := conn.Query(ctx, `SELECT version_num FROM public.alembic_version`)
+
+	rows, err := pool.Query(ctx, `SELECT version_num FROM public.alembic_version`)
 	if err != nil {
-		return fmt.Errorf("read legacy schema revision: %w", err)
+		return noLegacyHandoff, fmt.Errorf("read legacy schema revision: %w", err)
 	}
 	revisions, err := pgx.CollectRows(rows, pgx.RowTo[string])
 	if err != nil {
-		return fmt.Errorf("read legacy schema revision: %w", err)
+		return noLegacyHandoff, fmt.Errorf("read legacy schema revision: %w", err)
 	}
 	if len(revisions) == 1 {
 		switch revisions[0] {
-		case legacyBaselineRevision, legacySubmissionRevision:
-			return nil
+		case legacyBaselineRevision:
+			return baselineLegacyHandoff, nil
+		case legacySubmissionRevision:
+			return submissionLegacyHandoff, nil
 		}
 	}
-	return fmt.Errorf(
+	return noLegacyHandoff, fmt.Errorf(
 		"existing database has unsupported legacy revision %q; supported cutover revisions are %s",
-		strings.Join(revisions, ", "), legacyBaselineRevision+", "+legacySubmissionRevision,
+		strings.Join(revisions, ", "),
+		legacyBaselineRevision+", "+legacySubmissionRevision,
 	)
 }
 
-func finishLegacySchemaHandoff(ctx context.Context, conn *pgx.Conn) error {
-	_, err := conn.Exec(ctx, `DROP TABLE IF EXISTS public.alembic_version`)
-	return err
-}
-
-func migrationApplied(ctx context.Context, conn *pgx.Conn, m migration) (bool, error) {
-	var name string
-	err := conn.QueryRow(ctx,
-		`SELECT name FROM public.conbench_schema_migration WHERE version = $1`,
-		m.version,
-	).Scan(&name)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return false, nil
+func seedLegacyVersion(driver migratedb.Driver, handoff legacyHandoff) error {
+	version := 1
+	if handoff == submissionLegacyHandoff {
+		version = 2
 	}
-	if err != nil {
-		return false, fmt.Errorf("read migration %d: %w", m.version, err)
-	}
-	if name != m.name {
-		return false, fmt.Errorf("migration %d is recorded as %q, expected %q", m.version, name, m.name)
-	}
-	return true, nil
-}
-
-func addSubmissionIdempotency(ctx context.Context, conn *pgx.Conn) error {
-	if _, err := conn.Exec(ctx, `
-		ALTER TABLE public.benchmark_result
-			ADD COLUMN IF NOT EXISTS submission_key text,
-			ADD COLUMN IF NOT EXISTS submission_payload_sha256 text
-	`); err != nil {
-		return err
-	}
-	if _, err := conn.Exec(ctx, `
-		ALTER TABLE public.benchmark_result
-			DROP CONSTRAINT IF EXISTS benchmark_result_submission_idempotency_check;
-		ALTER TABLE public.benchmark_result
-			ADD CONSTRAINT benchmark_result_submission_idempotency_check
-			CHECK (
-				(submission_key IS NULL AND submission_payload_sha256 IS NULL)
-				OR (
-					submission_key IS NOT NULL
-					AND submission_payload_sha256 IS NOT NULL
-					AND submission_payload_sha256 ~ '^[0-9a-f]{64}$'
-				)
-			) NOT VALID
-	`); err != nil {
-		return err
-	}
-	// This migration intentionally runs outside a transaction so PostgreSQL can
-	// build the unique index without blocking writes for the duration of the
-	// table scan.
-	if err := ensureSubmissionKeyIndex(ctx, conn); err != nil {
-		return err
-	}
-	if _, err := conn.Exec(ctx, `
-		ALTER TABLE public.benchmark_result
-			VALIDATE CONSTRAINT benchmark_result_submission_idempotency_check
-	`); err != nil {
-		return err
+	if err := driver.SetVersion(version, false); err != nil {
+		return fmt.Errorf("seed legacy migration version %d: %w", version, err)
 	}
 	return nil
 }
 
-func ensureSubmissionKeyIndex(ctx context.Context, conn *pgx.Conn) error {
-	exists, valid, matches, err := submissionKeyIndexState(ctx, conn)
+func latestMigrationVersion() (int, error) {
+	files, err := fs.Glob(migrationFiles, "migrations/*.up.sql")
 	if err != nil {
-		return err
+		return migratedb.NilVersion, fmt.Errorf("list embedded migrations: %w", err)
 	}
-	if exists && (!valid || !matches) {
-		if _, err := conn.Exec(ctx, `DROP INDEX CONCURRENTLY public.benchmark_result_submission_key_index`); err != nil {
-			return err
+	latest := migratedb.NilVersion
+	for _, file := range files {
+		name := strings.TrimSuffix(path.Base(file), ".up.sql")
+		versionText, _, found := strings.Cut(name, "_")
+		if !found {
+			return migratedb.NilVersion, fmt.Errorf("parse migration version from %q", file)
 		}
-		exists = false
-	}
-	if !exists {
-		if _, err := conn.Exec(ctx, `
-			CREATE UNIQUE INDEX CONCURRENTLY benchmark_result_submission_key_index
-			ON public.benchmark_result (submission_key)
-			WHERE submission_key IS NOT NULL
-		`); err != nil {
-			return err
+		version, err := strconv.Atoi(versionText)
+		if err != nil {
+			return migratedb.NilVersion, fmt.Errorf("parse migration version from %q: %w", file, err)
+		}
+		if version > latest {
+			latest = version
 		}
 	}
-	exists, valid, matches, err = submissionKeyIndexState(ctx, conn)
-	if err != nil {
-		return err
+	if latest == migratedb.NilVersion {
+		return migratedb.NilVersion, errors.New("no embedded migrations found")
 	}
-	if !exists || !valid || !matches {
-		return errors.New("benchmark_result_submission_key_index was not created with the required definition")
-	}
-	return nil
+	return latest, nil
 }
 
-func submissionKeyIndexState(ctx context.Context, conn *pgx.Conn) (exists, valid, matches bool, err error) {
-	if err := conn.QueryRow(ctx, `
-		SELECT to_regclass('public.benchmark_result_submission_key_index') IS NOT NULL
-	`).Scan(&exists); err != nil {
-		return false, false, false, err
-	}
-	if !exists {
-		return false, false, false, nil
-	}
-	if err := conn.QueryRow(ctx, `
+func verifyCurrentSchema(ctx context.Context, pool *pgxpool.Pool) error {
+	const submissionConstraint = "CHECK ((((submission_key IS NULL) AND (submission_payload_sha256 IS NULL)) OR ((submission_key IS NOT NULL) AND (submission_payload_sha256 IS NOT NULL) AND (submission_payload_sha256 ~ '^[0-9a-f]{64}$'::text))))"
+	var keyColumn, hashColumn, constraintValid, indexValid bool
+	if err := pool.QueryRow(ctx, `
 		SELECT
-			i.indisvalid,
-			i.indisunique
-				AND i.indnkeyatts = 1
-				AND i.indnatts = 1
-				AND am.amname = 'btree'
-				AND COALESCE(a.attname = 'submission_key', false)
-				AND COALESCE(pg_get_expr(i.indpred, i.indrelid) = '(submission_key IS NOT NULL)', false)
-		FROM pg_index AS i
-		JOIN pg_class AS idx ON idx.oid = i.indexrelid
-		JOIN pg_am AS am ON am.oid = idx.relam
-		LEFT JOIN pg_attribute AS a
-			ON a.attrelid = i.indrelid AND a.attnum = i.indkey[0]
-		WHERE i.indexrelid = 'public.benchmark_result_submission_key_index'::regclass
-	`).Scan(&valid, &matches); err != nil {
-		return false, false, false, err
+			EXISTS (
+				SELECT 1 FROM pg_attribute
+				WHERE attrelid = 'public.benchmark_result'::regclass
+				  AND attname = 'submission_key'
+				  AND NOT attisdropped
+			),
+			EXISTS (
+				SELECT 1 FROM pg_attribute
+				WHERE attrelid = 'public.benchmark_result'::regclass
+				  AND attname = 'submission_payload_sha256'
+				  AND NOT attisdropped
+			),
+			EXISTS (
+				SELECT 1 FROM pg_constraint
+				WHERE conrelid = 'public.benchmark_result'::regclass
+				  AND conname = 'benchmark_result_submission_idempotency_check'
+				  AND convalidated
+				  AND pg_get_constraintdef(oid) = $1
+			),
+			EXISTS (
+				SELECT 1
+				FROM pg_index AS i
+				JOIN pg_class AS idx ON idx.oid = i.indexrelid
+				JOIN pg_am AS am ON am.oid = idx.relam
+				LEFT JOIN pg_attribute AS a
+				  ON a.attrelid = i.indrelid AND a.attnum = i.indkey[0]
+				WHERE i.indexrelid = to_regclass('public.benchmark_result_submission_key_index')
+				  AND i.indrelid = 'public.benchmark_result'::regclass
+				  AND i.indisunique
+				  AND i.indisvalid
+				  AND i.indnkeyatts = 1
+				  AND i.indnatts = 1
+				  AND am.amname = 'btree'
+				  AND a.attname = 'submission_key'
+				  AND pg_get_expr(i.indpred, i.indrelid) = '(submission_key IS NOT NULL)'
+			)
+	`, submissionConstraint).Scan(&keyColumn, &hashColumn, &constraintValid, &indexValid); err != nil {
+		return err
 	}
-	return true, valid, matches, nil
+	if !keyColumn || !hashColumn || !constraintValid || !indexValid {
+		return fmt.Errorf(
+			"submission idempotency schema is incomplete (key column=%t, hash column=%t, constraint=%t, index=%t)",
+			keyColumn,
+			hashColumn,
+			constraintValid,
+			indexValid,
+		)
+	}
+	return nil
 }

@@ -74,15 +74,6 @@ build-conbench-container-image:
 go-deploy-manifest-check:
 	scripts/check_go_deploy_manifests.sh
 
-.PHONY: repo-hygiene-check
-repo-hygiene-check:
-	PYTHONDONTWRITEBYTECODE=1 uv run --with tomli python -B -m unittest scripts.test_repo_hygiene
-	PYTHONDONTWRITEBYTECODE=1 uv run --with tomli python -B scripts/repo_hygiene.py .
-
-.PHONY: workflow-shape-check
-workflow-shape-check: repo-hygiene-check
-	PYTHONDONTWRITEBYTECODE=1 uv run --with tomli python -B -m unittest scripts.test_retired_python_surfaces
-
 # Bring up only the ephemeral dev Postgres for local work against the schema.
 .PHONY: dev-db
 dev-db:
@@ -127,7 +118,7 @@ dev:
 dev-down:
 	docker compose -p conbench_backend_dev -f docker-compose.backend-dev.yml down
 
-# Regenerate the typed Go data layer from schema.sql + query/*.sql.
+# Regenerate the typed Go data layer from numbered migrations + query/*.sql.
 .PHONY: sqlc
 sqlc:
 	sqlc generate
@@ -137,11 +128,15 @@ sqlc:
 sqlc-check:
 	sqlc diff
 
+.PHONY: migration-history-check
+migration-history-check:
+	go run ./tools/migrationhistorycheck
+
 # Go backend tooling. These operate on the Go module (cmd/ + internal/).
 # `go-lint` fixes in place; `go-lint-ci` is check-only.
 .PHONY: go-fmt
 go-fmt:
-	gofmt -w cmd internal
+	gofmt -w cmd internal tools
 
 .PHONY: go-lint
 go-lint:

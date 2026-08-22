@@ -155,9 +155,9 @@ func firstString(values []string) string {
 	return values[0]
 }
 
-// EnsureSchema brings a development database to the schema embedded in the Go
-// binary. Production deployments invoke the same migrator through `conbench
-// migrate` before starting the server.
+// EnsureSchema applies the numbered migrations embedded in the Go binary to a
+// development database. Production deployments invoke the same migrator
+// through `conbench migrate` before starting the server.
 func EnsureSchema(ctx context.Context, pool *pgxpool.Pool) error {
 	if err := db.Migrate(ctx, pool); err != nil {
 		return fmt.Errorf("migrate schema: %w", err)

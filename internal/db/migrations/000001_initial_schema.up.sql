@@ -1,11 +1,4 @@
--- Canonical schema for new Conbench databases.
--- Existing databases are advanced by the migrations embedded in the Go binary.
-
-CREATE TABLE public.conbench_schema_migration (
-    version bigint NOT NULL,
-    name text NOT NULL,
-    applied_at timestamp with time zone DEFAULT now() NOT NULL
-);
+-- Initial schema owned by the Go migration runner.
 
 CREATE TABLE public.alert_delivery (
     id character varying(50) NOT NULL,
@@ -94,10 +87,7 @@ CREATE TABLE public.benchmark_result (
     commit_id character varying(50),
     hardware_id character varying(50) NOT NULL,
     commit_repo_url text NOT NULL,
-    history_fingerprint text NOT NULL,
-    submission_key text,
-    submission_payload_sha256 text,
-    CONSTRAINT benchmark_result_submission_idempotency_check CHECK ((((submission_key IS NULL) AND (submission_payload_sha256 IS NULL)) OR ((submission_key IS NOT NULL) AND (submission_payload_sha256 IS NOT NULL) AND (submission_payload_sha256 ~ '^[0-9a-f]{64}$'::text))))
+    history_fingerprint text NOT NULL
 );
 
 CREATE TABLE public."case" (
@@ -168,9 +158,6 @@ CREATE TABLE public."user" (
     name character varying(120) NOT NULL,
     password character varying(128) NOT NULL
 );
-
-ALTER TABLE ONLY public.conbench_schema_migration
-    ADD CONSTRAINT conbench_schema_migration_pkey PRIMARY KEY (version);
 
 ALTER TABLE ONLY public.alert_delivery
     ADD CONSTRAINT alert_delivery_event_channel_target_key UNIQUE (event_id, channel, target);
@@ -243,8 +230,6 @@ CREATE INDEX benchmark_result_run_id_index ON public.benchmark_result USING btre
 CREATE INDEX benchmark_result_run_id_timestamp_idx ON public.benchmark_result USING btree (run_id, "timestamp") WHERE ("timestamp" >= '2023-11-19 00:00:00'::timestamp without time zone);
 
 CREATE INDEX benchmark_result_run_reason_id_idx ON public.benchmark_result USING btree (run_reason, id) WHERE ("timestamp" >= '2023-06-03 00:00:00'::timestamp without time zone);
-
-CREATE UNIQUE INDEX benchmark_result_submission_key_index ON public.benchmark_result USING btree (submission_key) WHERE (submission_key IS NOT NULL);
 
 CREATE INDEX benchmark_result_timestamp_index ON public.benchmark_result USING btree ("timestamp");
 

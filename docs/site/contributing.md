@@ -12,7 +12,6 @@ make go-test
 make sqlc-check
 make codegen-check
 make build
-make repo-hygiene-check
 make docs-link-check
 make build-docs
 ```
@@ -36,21 +35,6 @@ The maintained source tree should stay explainable from the repository root:
   packaging, smoke-test, and deploy-rendering support for the single
   `conbench` binary.
 
-`make repo-hygiene-check` verifies that retired top-level Python package paths,
-single-file module names, and root Python application configuration files stay
-untracked. The remaining tracked Python files are intentionally scoped to
-repository and documentation checks. The same check parses those active Python
-files and rejects imports from retired legacy packages such as `benchadapt`,
-`benchconnect`, `benchalerts`, `benchclients`, `benchrun`, `conbenchlegacy`,
-and `conbench_client`.
-It also rejects split command directories such as `cmd/conbench-server` and
-`cmd/conbench-openapi`; the maintained runtime and CLI surface belongs in the
-single `conbench` binary.
-`scripts/retired_python_surfaces.py` is the shared source of truth for
-retired Python package names, single-file module names, and path prefixes;
-update that file rather than duplicating package lists in workflow, repo, or
-artifact-hygiene checks.
-
 ## Generated Artifacts
 
 The Go structs and huma routes are the API source of truth. Regenerate OpenAPI
@@ -68,6 +52,15 @@ make sqlc
 
 Do not hand-edit generated client or sqlc files unless you are intentionally
 testing generator output and will regenerate before committing.
+
+## Database Migrations
+
+Number migrations sequentially under `internal/db/migrations` and provide
+matching `.up.sql` and `.down.sql` files. After the initial history bootstrap,
+a pull request adds at most one migration; amend that migration before it ships,
+and never edit migration files already present on the target branch. Run
+`make migration-history-check` before committing. sqlc reads the same migration
+directory, so schema changes and query generation have one source of truth.
 
 ## Documentation
 

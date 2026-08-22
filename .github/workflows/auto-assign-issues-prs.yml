@@ -1,22 +1,22 @@
 name: Auto assign pull requests and issues
 on:
   pull_request_target:
-    types: [opened, reopened, edited]
+    types: [opened, reopened, edited, synchronize]
 
 env:
-  # secrets.GITHUB_TOKEN is provided by GitHub Actions.
-  # It allows for 1000 GitHub HTTP API requests per hour.
-  # Currently (as of 2023-02) graphql queries must use a GitHub PAT
-  # and cannot use a fine-grained token.
   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+permissions:
+  issues: write
+  pull-requests: write
 
 jobs:
   assign-issue-and-pr-author:
     runs-on: ubuntu-latest
     steps:
-      - uses: toshimaru/auto-author-assign@v1.6.2
+      - uses: toshimaru/auto-author-assign@2daaeb2988aef24bf37e636fe733f365c046aba0 # v1.6.2
         name: Assign PR author to the PR itself
-      - uses: octokit/graphql-action@v2.x
+      - uses: octokit/graphql-action@f7836e89a7e5bac63911bbe9653c21147b3d9bc3 # v2.x
         name: Get the linked issue
         id: get_linked_issue
         with:
@@ -28,29 +28,26 @@ jobs:
                   closingIssuesReferences (first: 50) {
                     edges {
                       node {
-                        id
-                        body
                         number
-                        title
                       }
                     }
                   }
                 }
               }
             }
-          owner: ${{ github.repository_owner }}
-          repo: ${{ github.event.repository.name }}
-          pr_number: ${{ github.event.pull_request.number }}
-      - name: Show the linked issue output
-        env:
-          RETRIEVED_ISSUE: ${{ steps.get_linked_issue.outputs.data }}
-        run: |
-          echo "Issue output: $RETRIEVED_ISSUE"
-        continue-on-error: true
+          variables: |
+            owner: ${{ github.repository_owner }}
+            repo: ${{ github.event.repository.name }}
+            pr_number: ${{ github.event.pull_request.number }}
       - name: Assign the PR author to the issue
         env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
           RETRIEVED_ISSUE: ${{ steps.get_linked_issue.outputs.data }}
         run: |
-          echo "$RETRIEVED_ISSUE" | \
-          jq -c '.. | objects | select(has("edges")) | .edges | .[].node.number' | \
-          xargs -I{} gh api repos/conbench/conbench/issues/{}/assignees -f assignees="${{ github.event.pull_request.user.login }}"
+          jq -r '.. | objects | select(has("edges")) | .edges | .[].node.number' \
+            <<<"$RETRIEVED_ISSUE" |
+          while read -r issue_number; do
+            gh api "repos/$GITHUB_REPOSITORY/issues/$issue_number/assignees" \
+              -F "assignees[]=$PR_AUTHOR"
+          done
