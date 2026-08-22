@@ -1,13 +1,17 @@
 package service
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
 	"math"
 	"strconv"
+	"unicode/utf8"
 
 	"github.com/conbench/conbench/internal/commit"
 	"github.com/conbench/conbench/internal/hardware"
@@ -33,8 +37,14 @@ func (e *ValidationError) Error() string { return e.Message }
 // fingerprint of the history series it belongs to.
 type Result struct {
 	ID                 string
+	RunID              string
 	HistoryFingerprint string
 }
+
+// ErrSubmissionConflict marks reuse of one idempotency key for different content.
+var ErrSubmissionConflict = errors.New("submission key already exists with different content")
+
+const maxSubmissionKeyLength = 255
 
 // Ingester persists a submitted benchmark result. It composes the data layer
 // (get-or-create of the related entities, the result insert), the stats/units/
@@ -57,6 +67,24 @@ func NewIngester(store storage.Store, commits commit.Provider) *Ingester {
 // partial-data error), get-or-create the related entities, resolve the commit,
 // compute the fingerprint, and insert the result row.
 func (i *Ingester) Submit(ctx context.Context, req SubmitRequest) (*Result, error) {
+	canonicalHash := ""
+	if req.SubmissionKey != "" {
+		if utf8.RuneCountInString(req.SubmissionKey) > maxSubmissionKeyLength {
+			return nil, &ValidationError{Message: "submission_key must be at most 255 characters"}
+		}
+		var err error
+		canonicalHash, err = canonicalSubmissionPayloadSHA256(req)
+		if err != nil {
+			return nil, err
+		}
+		existing, lookupErr := i.store.GetBenchmarkResultBySubmissionKey(ctx, req.SubmissionKey)
+		if lookupErr != nil && !errors.Is(lookupErr, storage.ErrNotFound) {
+			return nil, fmt.Errorf("look up submission key: %w", lookupErr)
+		}
+		if lookupErr == nil {
+			return replaySubmission(existing, canonicalHash)
+		}
+	}
 	if err := validateHardware(req); err != nil {
 		return nil, err
 	}
@@ -123,16 +151,53 @@ func (i *Ingester) Submit(ctx context.Context, req SubmitRequest) (*Result, erro
 		caseID: caseID, contextID: contextID, infoID: infoID,
 		hardwareID: hardwareID, commitID: commitID,
 		repoURL: repoURL, fingerprint: fingerprint,
-	})
+	}, canonicalHash)
 	if err != nil {
 		return nil, err
 	}
 
 	id, err := i.store.InsertBenchmarkResult(ctx, ins)
+	if errors.Is(err, storage.ErrConflict) && req.SubmissionKey != "" {
+		existing, lookupErr := i.store.GetBenchmarkResultBySubmissionKey(ctx, req.SubmissionKey)
+		if lookupErr != nil {
+			return nil, fmt.Errorf("resolve concurrent submission replay: %w", lookupErr)
+		}
+		return replaySubmission(existing, canonicalHash)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("insert benchmark result: %w", err)
 	}
-	return &Result{ID: id, HistoryFingerprint: fingerprint}, nil
+	return &Result{ID: id, RunID: req.RunID, HistoryFingerprint: fingerprint}, nil
+}
+
+func canonicalSubmissionPayloadSHA256(req SubmitRequest) (string, error) {
+	payload, err := json.Marshal(req)
+	if err != nil {
+		return "", fmt.Errorf("encode submission payload: %w", err)
+	}
+	var canonicalObject map[string]any
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.UseNumber()
+	if err := decoder.Decode(&canonicalObject); err != nil {
+		return "", fmt.Errorf("normalize submission payload: %w", err)
+	}
+	delete(canonicalObject, "submission_key")
+	payload, err = json.Marshal(canonicalObject)
+	if err != nil {
+		return "", fmt.Errorf("canonicalize submission payload: %w", err)
+	}
+	digest := sha256.Sum256(payload)
+	return hex.EncodeToString(digest[:]), nil
+}
+
+func replaySubmission(existing storage.SubmissionResult, canonicalHash string) (*Result, error) {
+	if existing.PayloadSHA256 != canonicalHash {
+		return nil, ErrSubmissionConflict
+	}
+	return &Result{
+		ID: existing.ID, RunID: existing.RunID,
+		HistoryFingerprint: existing.HistoryFingerprint,
+	}, nil
 }
 
 // insertRefs carries the resolved entity references the insert-params builder
@@ -146,7 +211,7 @@ type insertRefs struct {
 // buildInsertParams assembles the full column set for the result row: request
 // passthroughs, the resolved stats branch, the annotation blobs, and the
 // resolved entity references.
-func buildInsertParams(req SubmitRequest, rs resolved, refs insertRefs) (storage.InsertBenchmarkResultParams, error) {
+func buildInsertParams(req SubmitRequest, rs resolved, refs insertRefs, submissionPayloadSHA256 string) (storage.InsertBenchmarkResultParams, error) {
 	var zero storage.InsertBenchmarkResultParams
 	runTags, err := buildRunTags(req)
 	if err != nil {
@@ -166,27 +231,29 @@ func buildInsertParams(req SubmitRequest, rs resolved, refs insertRefs) (storage
 	}
 
 	ins := storage.InsertBenchmarkResultParams{
-		CaseID:                refs.caseID,
-		ContextID:             refs.contextID,
-		InfoID:                refs.infoID,
-		HardwareID:            refs.hardwareID,
-		RunID:                 req.RunID,
-		RunTags:               runTags,
-		RunReason:             strOrNil(req.RunReason),
-		CommitID:              refs.commitID,
-		CommitRepoUrl:         refs.repoURL,
-		HistoryFingerprint:    refs.fingerprint,
-		Timestamp:             req.Timestamp.UTC(),
-		Unit:                  rs.unit,
-		TimeUnit:              rs.timeUnit,
-		BatchID:               strOrNil(req.BatchID),
-		Iterations:            rs.iterations,
-		Error:                 rs.errorJSON,
-		Data:                  rs.data,
-		Times:                 rs.times,
-		Validation:            validationJSON,
-		OptionalBenchmarkInfo: obiJSON,
-		ChangeAnnotations:     caJSON,
+		CaseID:                  refs.caseID,
+		ContextID:               refs.contextID,
+		InfoID:                  refs.infoID,
+		HardwareID:              refs.hardwareID,
+		RunID:                   req.RunID,
+		RunTags:                 runTags,
+		RunReason:               strOrNil(req.RunReason),
+		CommitID:                refs.commitID,
+		CommitRepoUrl:           refs.repoURL,
+		HistoryFingerprint:      refs.fingerprint,
+		Timestamp:               req.Timestamp.UTC(),
+		Unit:                    rs.unit,
+		TimeUnit:                rs.timeUnit,
+		BatchID:                 strOrNil(req.BatchID),
+		Iterations:              rs.iterations,
+		Error:                   rs.errorJSON,
+		Data:                    rs.data,
+		Times:                   rs.times,
+		Validation:              validationJSON,
+		OptionalBenchmarkInfo:   obiJSON,
+		ChangeAnnotations:       caJSON,
+		SubmissionKey:           strOrNil(req.SubmissionKey),
+		SubmissionPayloadSHA256: strOrNil(submissionPayloadSHA256),
 	}
 	ins.Mean, ins.Min, ins.Max, ins.Median = rs.aggs.Mean, rs.aggs.Min, rs.aggs.Max, rs.aggs.Median
 	ins.Q1, ins.Q3, ins.Stdev, ins.Iqr = rs.aggs.Q1, rs.aggs.Q3, rs.aggs.Stdev, rs.aggs.Iqr

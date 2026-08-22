@@ -19,6 +19,7 @@ type migration struct {
 
 var migrations = []migration{
 	{version: 1, name: "go-schema-baseline"},
+	{version: 2, name: "submission-idempotency", apply: addSubmissionIdempotency},
 }
 
 // MigrationCount reports the number of schema revisions built into this
@@ -104,4 +105,62 @@ func migrationApplied(ctx context.Context, conn *pgx.Conn, m migration) (bool, e
 		return false, fmt.Errorf("migration %d is recorded as %q, expected %q", m.version, name, m.name)
 	}
 	return true, nil
+}
+
+func addSubmissionIdempotency(ctx context.Context, conn *pgx.Conn) error {
+	if _, err := conn.Exec(ctx, `
+		ALTER TABLE public.benchmark_result
+			ADD COLUMN IF NOT EXISTS submission_key text,
+			ADD COLUMN IF NOT EXISTS submission_payload_sha256 text
+	`); err != nil {
+		return err
+	}
+	if _, err := conn.Exec(ctx, `
+		DO $$
+		BEGIN
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_constraint
+				WHERE conrelid = 'public.benchmark_result'::regclass
+				  AND conname = 'benchmark_result_submission_idempotency_check'
+			) THEN
+				ALTER TABLE public.benchmark_result
+					ADD CONSTRAINT benchmark_result_submission_idempotency_check
+					CHECK (
+						(submission_key IS NULL AND submission_payload_sha256 IS NULL)
+						OR (submission_key IS NOT NULL AND submission_payload_sha256 ~ '^[0-9a-f]{64}$')
+					) NOT VALID;
+			END IF;
+		END
+		$$
+	`); err != nil {
+		return err
+	}
+	// This migration intentionally runs outside a transaction so PostgreSQL can
+	// build the unique index without blocking writes for the duration of the
+	// table scan.
+	if _, err := conn.Exec(ctx, `
+		CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS benchmark_result_submission_key_index
+		ON public.benchmark_result (submission_key)
+		WHERE submission_key IS NOT NULL
+	`); err != nil {
+		return err
+	}
+	if _, err := conn.Exec(ctx, `
+		ALTER TABLE public.benchmark_result
+			VALIDATE CONSTRAINT benchmark_result_submission_idempotency_check
+	`); err != nil {
+		return err
+	}
+	var indexValid bool
+	if err := conn.QueryRow(ctx, `
+		SELECT indisvalid
+		FROM pg_index
+		WHERE indexrelid = 'public.benchmark_result_submission_key_index'::regclass
+	`).Scan(&indexValid); err != nil {
+		return err
+	}
+	if !indexValid {
+		return errors.New("benchmark_result_submission_key_index exists but is invalid")
+	}
+	return nil
 }

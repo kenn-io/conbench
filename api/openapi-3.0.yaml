@@ -431,6 +431,8 @@ components:
     CIReportSide:
       additionalProperties: false
       properties:
+        begins_distribution_change:
+          type: boolean
         commit_sha:
           nullable: true
           type: string
@@ -464,6 +466,7 @@ components:
         - error
         - single_value_summary
         - single_value_summary_type
+        - begins_distribution_change
       type: object
     CIReportSummary:
       additionalProperties: false
@@ -814,6 +817,9 @@ components:
       properties:
         benchmark_result_id:
           type: string
+        change_annotations:
+          additionalProperties: {}
+          type: object
         commit_hash:
           type: string
         commit_message:
@@ -832,6 +838,9 @@ components:
           type: array
         hardware_hash:
           type: string
+        info:
+          additionalProperties: {}
+          type: object
         mean:
           format: double
           nullable: true
@@ -839,6 +848,9 @@ components:
         result_timestamp:
           format: date-time
           type: string
+        run_tags:
+          additionalProperties: {}
+          type: object
         single_value_summary:
           format: double
           type: number
@@ -862,6 +874,9 @@ components:
         - commit_repository
         - commit_message
         - commit_timestamp
+        - run_tags
+        - info
+        - change_annotations
         - zscorestats
       type: object
     HistorySeries:
@@ -1574,8 +1589,11 @@ components:
           type: string
         id:
           type: string
+        run_id:
+          type: string
       required:
         - id
+        - run_id
         - history_fingerprint
       type: object
     SubmitRequest:
@@ -1623,6 +1641,9 @@ components:
           type: object
         stats:
           $ref: "#/components/schemas/StatsInput"
+        submission_key:
+          maxLength: 255
+          type: string
         tags:
           additionalProperties: {}
           type: object

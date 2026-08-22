@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -26,6 +27,44 @@ func newIngester(t *testing.T) (*service.Ingester, *db.Store, *pgxpool.Pool, con
 	pool, ctx := dbtest.NewPool(t)
 	store := db.NewStore(pool)
 	return service.NewIngester(store, commit.LocalProvider{}), store, pool, ctx
+}
+
+func TestSubmitIdempotentReplayAndConflict(t *testing.T) {
+	ing, _, _, ctx := newIngester(t)
+	req := machineReq(samples(1, 2, 3), "s")
+	req.SubmissionKey = "publisher-0000000000000001"
+
+	first, err := ing.Submit(ctx, req)
+	require.NoError(t, err)
+	second, err := ing.Submit(ctx, req)
+	require.NoError(t, err)
+	assert.Equal(t, first, second)
+	assert.Equal(t, req.RunID, second.RunID)
+
+	changed := req
+	changed.Stats = &service.StatsInput{Data: samples(4, 5, 6), Unit: "s"}
+	_, err = ing.Submit(ctx, changed)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, service.ErrSubmissionConflict)
+}
+
+func TestSubmitWithoutIdempotencyKeyCreatesIndependentResults(t *testing.T) {
+	ing, _, _, ctx := newIngester(t)
+	req := machineReq(samples(1, 2, 3), "s")
+	first, err := ing.Submit(ctx, req)
+	require.NoError(t, err)
+	second, err := ing.Submit(ctx, req)
+	require.NoError(t, err)
+	assert.NotEqual(t, first.ID, second.ID)
+}
+
+func TestSubmitAcceptsMaximumLengthUnicodeIdempotencyKey(t *testing.T) {
+	ing, _, _, ctx := newIngester(t)
+	req := machineReq(samples(1, 2, 3), "s")
+	req.SubmissionKey = strings.Repeat("é", 255)
+
+	_, err := ing.Submit(ctx, req)
+	require.NoError(t, err)
 }
 
 // samples wraps float values as the nullable per-iteration slice the payload carries.

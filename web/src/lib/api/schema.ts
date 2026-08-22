@@ -557,6 +557,7 @@ export interface components {
             };
         };
         CIReportSide: {
+            begins_distribution_change: boolean;
             commit_sha: string | null;
             /** Format: date-time */
             commit_timestamp: string | null;
@@ -768,6 +769,9 @@ export interface components {
         };
         HistorySample: {
             benchmark_result_id: string;
+            change_annotations: {
+                [key: string]: unknown;
+            };
             commit_hash: string;
             commit_message: string;
             commit_repository: string;
@@ -775,10 +779,16 @@ export interface components {
             commit_timestamp: string | null;
             data: number[] | null;
             hardware_hash: string;
+            info: {
+                [key: string]: unknown;
+            };
             /** Format: double */
             mean: number | null;
             /** Format: date-time */
             result_timestamp: string;
+            run_tags: {
+                [key: string]: unknown;
+            };
             /** Format: double */
             single_value_summary: number;
             single_value_summary_type: string;
@@ -1099,6 +1109,7 @@ export interface components {
             readonly $schema?: string;
             history_fingerprint: string;
             id: string;
+            run_id: string;
         };
         SubmitRequest: {
             /**
@@ -1133,6 +1144,7 @@ export interface components {
                 [key: string]: unknown;
             };
             stats?: components["schemas"]["StatsInput"];
+            submission_key?: string;
             tags: {
                 [key: string]: unknown;
             };
