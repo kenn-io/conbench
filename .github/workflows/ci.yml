@@ -36,6 +36,8 @@ jobs:
           sudo install golangci-lint-2.12.2-linux-amd64/golangci-lint /usr/local/bin/golangci-lint
           golangci-lint version
       - run: make migration-history-check
+        env:
+          CONBENCH_MIGRATION_BASE_REF: ${{ github.event.before }}
       - run: make go-lint-ci
       - run: make go-vet
       - run: make go-test

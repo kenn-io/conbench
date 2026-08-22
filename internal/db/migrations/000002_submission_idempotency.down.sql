@@ -1,6 +1,6 @@
-DROP INDEX CONCURRENTLY public.benchmark_result_submission_key_index;
+DROP INDEX CONCURRENTLY IF EXISTS public.benchmark_result_submission_key_index;
 
 ALTER TABLE public.benchmark_result
-    DROP CONSTRAINT benchmark_result_submission_idempotency_check,
-    DROP COLUMN submission_payload_sha256,
-    DROP COLUMN submission_key;
+    DROP CONSTRAINT IF EXISTS benchmark_result_submission_idempotency_check,
+    DROP COLUMN IF EXISTS submission_payload_sha256,
+    DROP COLUMN IF EXISTS submission_key;

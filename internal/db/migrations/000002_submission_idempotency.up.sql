@@ -1,6 +1,9 @@
 ALTER TABLE public.benchmark_result
-    ADD COLUMN submission_key text,
-    ADD COLUMN submission_payload_sha256 text;
+    ADD COLUMN IF NOT EXISTS submission_key text,
+    ADD COLUMN IF NOT EXISTS submission_payload_sha256 text;
+
+ALTER TABLE public.benchmark_result
+    DROP CONSTRAINT IF EXISTS benchmark_result_submission_idempotency_check;
 
 ALTER TABLE public.benchmark_result
     ADD CONSTRAINT benchmark_result_submission_idempotency_check
@@ -12,6 +15,8 @@ ALTER TABLE public.benchmark_result
             AND submission_payload_sha256 ~ '^[0-9a-f]{64}$'
         )
     ) NOT VALID;
+
+DROP INDEX CONCURRENTLY IF EXISTS public.benchmark_result_submission_key_index;
 
 CREATE UNIQUE INDEX CONCURRENTLY benchmark_result_submission_key_index
     ON public.benchmark_result (submission_key)

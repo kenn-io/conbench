@@ -53,18 +53,11 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("list base migrations: %w", err)
 	}
 
-	var candidateFiles, changedPaths []string
-	if comparisonRef == "HEAD^1" {
-		candidateFiles, err = gitLines(ctx, "ls-tree", "-r", "--name-only", "HEAD", "--", defaultMigrationDir)
-		if err == nil {
-			changedPaths, err = gitLines(ctx, "diff", "--name-only", comparisonRef, "HEAD", "--", defaultMigrationDir)
-		}
-	} else {
-		candidateFiles, err = gitLines(ctx, "ls-files", "--cached", "--", defaultMigrationDir)
-		if err == nil {
-			changedPaths, err = gitLines(ctx, "diff", "--cached", "--name-only", "--", defaultMigrationDir)
-		}
+	candidateFiles, err := gitLines(ctx, "ls-files", "--cached", "--", defaultMigrationDir)
+	if err != nil {
+		return fmt.Errorf("inspect candidate migrations: %w", err)
 	}
+	changedPaths, err := gitLines(ctx, "diff", "--name-only", comparisonRef, "--", defaultMigrationDir)
 	if err != nil {
 		return fmt.Errorf("inspect candidate migrations: %w", err)
 	}

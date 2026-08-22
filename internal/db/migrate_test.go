@@ -3,6 +3,7 @@ package db_test
 import (
 	"context"
 	"os"
+	"sync"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -38,21 +39,7 @@ func TestMigrateAdoptsLegacyBaselineRevision(t *testing.T) {
 func TestMigrateNormalizesLegacySubmissionRevision(t *testing.T) {
 	pool, ctx := dbtest.NewEmptyPool(t)
 	applyInitialSchema(t, ctx, pool)
-	_, err := pool.Exec(ctx, `
-		ALTER TABLE public.benchmark_result
-			ADD COLUMN submission_key text,
-			ADD COLUMN submission_payload_sha256 text;
-		ALTER TABLE public.benchmark_result
-			ADD CONSTRAINT benchmark_result_submission_idempotency_check
-			CHECK (
-				(submission_key IS NULL AND submission_payload_sha256 IS NULL)
-				OR (submission_key IS NOT NULL AND submission_payload_sha256 ~ '^[0-9a-f]{64}$')
-			);
-		CREATE UNIQUE INDEX benchmark_result_submission_key_index
-			ON public.benchmark_result (submission_key)
-			WHERE submission_key IS NOT NULL
-	`)
-	require.NoError(t, err)
+	applyLegacySubmissionSchema(t, ctx, pool)
 	createLegacyRevision(t, ctx, pool, "a6b7c8d9e0f1")
 
 	require.NoError(t, db.Migrate(ctx, pool))
@@ -60,7 +47,7 @@ func TestMigrateNormalizesLegacySubmissionRevision(t *testing.T) {
 	assertLegacyLedgerRemoved(t, ctx, pool)
 
 	insertBenchmarkDependencies(t, ctx, pool)
-	_, err = pool.Exec(ctx, `
+	_, err := pool.Exec(ctx, `
 		INSERT INTO public.benchmark_result (
 			id, case_id, context_id, info_id, hardware_id, run_id, run_tags,
 			"timestamp", commit_repo_url, history_fingerprint,
@@ -71,6 +58,57 @@ func TestMigrateNormalizesLegacySubmissionRevision(t *testing.T) {
 		)
 	`)
 	require.Error(t, err, "the current constraint must reject a keyed result without a payload hash")
+}
+
+func TestMigrateSerializesConcurrentLegacyHandoff(t *testing.T) {
+	pool, ctx := dbtest.NewEmptyPool(t)
+	applyInitialSchema(t, ctx, pool)
+	applyLegacySubmissionSchema(t, ctx, pool)
+	createLegacyRevision(t, ctx, pool, "a6b7c8d9e0f1")
+
+	const callers = 8
+	start := make(chan struct{})
+	errs := make(chan error, callers)
+	var ready sync.WaitGroup
+	ready.Add(callers)
+	for range callers {
+		go func() {
+			ready.Done()
+			<-start
+			errs <- db.Migrate(ctx, pool)
+		}()
+	}
+	ready.Wait()
+	close(start)
+	for range callers {
+		require.NoError(t, <-errs)
+	}
+	assertCurrentMigration(t, ctx, pool)
+	assertLegacyLedgerRemoved(t, ctx, pool)
+}
+
+func TestMigrateResumesEmptyMixedLegacyHandoff(t *testing.T) {
+	pool, ctx := dbtest.NewEmptyPool(t)
+	applyInitialSchema(t, ctx, pool)
+	applyLegacySubmissionSchema(t, ctx, pool)
+	createLegacyRevision(t, ctx, pool, "a6b7c8d9e0f1")
+	createEmptyMigrationLedger(t, ctx, pool)
+
+	require.NoError(t, db.Migrate(ctx, pool))
+	assertCurrentMigration(t, ctx, pool)
+	assertLegacyLedgerRemoved(t, ctx, pool)
+}
+
+func TestMigrateResumesDirtyLegacyHandoff(t *testing.T) {
+	pool, ctx := dbtest.NewEmptyPool(t)
+	applyInitialSchema(t, ctx, pool)
+	applyLegacySubmissionSchema(t, ctx, pool)
+	createLegacyRevision(t, ctx, pool, "a6b7c8d9e0f1")
+	createMigrationLedger(t, ctx, pool, 2, true)
+
+	require.NoError(t, db.Migrate(ctx, pool))
+	assertCurrentMigration(t, ctx, pool)
+	assertLegacyLedgerRemoved(t, ctx, pool)
 }
 
 func TestMigrateRejectsUnmarkedExistingDatabase(t *testing.T) {
@@ -120,13 +158,14 @@ func TestMigrateRejectsNewerVersion(t *testing.T) {
 	require.ErrorContains(t, err, "version 99 is newer than this binary")
 }
 
-func TestMigrateRejectsMixedSchemaOwnership(t *testing.T) {
+func TestMigrateCompletesMixedSchemaOwnershipHandoff(t *testing.T) {
 	pool, ctx := dbtest.NewEmptyPool(t)
 	require.NoError(t, db.Migrate(ctx, pool))
-	createLegacyRevision(t, ctx, pool, "9d5f3c1a7b2e")
+	createLegacyRevision(t, ctx, pool, "a6b7c8d9e0f1")
 
-	err := db.Migrate(ctx, pool)
-	require.ErrorContains(t, err, "both Go and legacy migration ledgers")
+	require.NoError(t, db.Migrate(ctx, pool))
+	assertCurrentMigration(t, ctx, pool)
+	assertLegacyLedgerRemoved(t, ctx, pool)
 }
 
 func TestMigrateRejectsSubmissionIndexDriftAtCurrentVersion(t *testing.T) {
@@ -188,6 +227,25 @@ func applyInitialSchema(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 	require.NoError(t, err)
 }
 
+func applyLegacySubmissionSchema(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+	t.Helper()
+	_, err := pool.Exec(ctx, `
+		ALTER TABLE public.benchmark_result
+			ADD COLUMN submission_key text,
+			ADD COLUMN submission_payload_sha256 text;
+		ALTER TABLE public.benchmark_result
+			ADD CONSTRAINT benchmark_result_submission_idempotency_check
+			CHECK (
+				(submission_key IS NULL AND submission_payload_sha256 IS NULL)
+				OR (submission_key IS NOT NULL AND submission_payload_sha256 ~ '^[0-9a-f]{64}$')
+			);
+		CREATE UNIQUE INDEX benchmark_result_submission_key_index
+			ON public.benchmark_result (submission_key)
+			WHERE submission_key IS NOT NULL
+	`)
+	require.NoError(t, err)
+}
+
 func createLegacyRevision(t *testing.T, ctx context.Context, pool *pgxpool.Pool, revision string) {
 	t.Helper()
 	_, err := pool.Exec(ctx, `
@@ -202,14 +260,19 @@ func createLegacyRevision(t *testing.T, ctx context.Context, pool *pgxpool.Pool,
 
 func createMigrationLedger(t *testing.T, ctx context.Context, pool *pgxpool.Pool, version int, dirty bool) {
 	t.Helper()
+	createEmptyMigrationLedger(t, ctx, pool)
+	_, err := pool.Exec(ctx, `INSERT INTO public.schema_migrations (version, dirty) VALUES ($1, $2)`, version, dirty)
+	require.NoError(t, err)
+}
+
+func createEmptyMigrationLedger(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+	t.Helper()
 	_, err := pool.Exec(ctx, `
 		CREATE TABLE public.schema_migrations (
 			version bigint NOT NULL PRIMARY KEY,
 			dirty boolean NOT NULL
 		)
 	`)
-	require.NoError(t, err)
-	_, err = pool.Exec(ctx, `INSERT INTO public.schema_migrations (version, dirty) VALUES ($1, $2)`, version, dirty)
 	require.NoError(t, err)
 }
 

@@ -10,6 +10,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/golang-migrate/migrate/v4"
 	migratedb "github.com/golang-migrate/migrate/v4/database"
@@ -23,7 +24,10 @@ const (
 	legacyBaselineRevision   = "9d5f3c1a7b2e"
 	legacySubmissionRevision = "a6b7c8d9e0f1"
 	migrationTableName       = "schema_migrations"
+	migrationHandoffLockID   = int64(0x636f6e62656e6368)
 )
+
+var errSubmissionSchemaIncomplete = errors.New("submission idempotency schema is incomplete")
 
 //go:embed migrations/*.sql
 var migrationFiles embed.FS
@@ -41,7 +45,15 @@ const (
 // version/dirty-state ledger. Go only recognizes the two exact schema markers
 // needed to hand existing pre-Go databases to that migration history.
 func Migrate(ctx context.Context, pool *pgxpool.Pool) (returnErr error) {
-	handoff, err := inspectLegacyHandoff(ctx, pool)
+	lockConn, err := acquireMigrationLock(ctx, pool)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		returnErr = errors.Join(returnErr, releaseMigrationLock(lockConn))
+	}()
+
+	handoff, err := inspectLegacyHandoff(ctx, lockConn.Conn())
 	if err != nil {
 		return err
 	}
@@ -87,13 +99,8 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) (returnErr error) {
 	}
 
 	if handoff != noLegacyHandoff {
-		if err := seedLegacyVersion(databaseDriver, handoff); err != nil {
+		if err := prepareLegacyHandoff(ctx, lockConn.Conn(), databaseDriver, migrator, handoff, latest); err != nil {
 			return err
-		}
-		if handoff == submissionLegacyHandoff {
-			if err := migrator.Steps(-1); err != nil {
-				return fmt.Errorf("normalize legacy submission schema: %w", err)
-			}
 		}
 	}
 
@@ -122,20 +129,53 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) (returnErr error) {
 	if dirty || version != latest {
 		return fmt.Errorf("database ended at migration version %d (dirty=%t), expected %d", version, dirty, latest)
 	}
-	if err := verifyCurrentSchema(ctx, pool); err != nil {
+	if err := verifyCurrentSchema(ctx, lockConn.Conn()); err != nil {
 		return fmt.Errorf("verify migrated schema: %w", err)
 	}
 	if handoff != noLegacyHandoff {
-		if _, err := pool.Exec(ctx, `DROP TABLE public.alembic_version`); err != nil {
+		if _, err := lockConn.Exec(ctx, `DROP TABLE public.alembic_version`); err != nil {
 			return fmt.Errorf("finish legacy schema handoff: %w", err)
 		}
 	}
 	return nil
 }
 
-func inspectLegacyHandoff(ctx context.Context, pool *pgxpool.Pool) (legacyHandoff, error) {
+func acquireMigrationLock(ctx context.Context, pool *pgxpool.Pool) (*pgxpool.Conn, error) {
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("acquire migration lock connection: %w", err)
+	}
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		var acquired bool
+		if err := conn.QueryRow(ctx, `SELECT pg_try_advisory_lock($1)`, migrationHandoffLockID).Scan(&acquired); err != nil {
+			conn.Release()
+			return nil, fmt.Errorf("acquire migration lock: %w", err)
+		}
+		if acquired {
+			return conn, nil
+		}
+		select {
+		case <-ctx.Done():
+			conn.Release()
+			return nil, fmt.Errorf("acquire migration lock: %w", ctx.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
+func releaseMigrationLock(conn *pgxpool.Conn) error {
+	defer conn.Release()
+	if _, err := conn.Exec(context.Background(), `SELECT pg_advisory_unlock($1)`, migrationHandoffLockID); err != nil {
+		return fmt.Errorf("release migration lock: %w", err)
+	}
+	return nil
+}
+
+func inspectLegacyHandoff(ctx context.Context, conn *pgx.Conn) (legacyHandoff, error) {
 	var schemaExists, ledgerExists, legacyLedgerExists bool
-	if err := pool.QueryRow(ctx, `
+	if err := conn.QueryRow(ctx, `
 		SELECT to_regclass('public.benchmark_result') IS NOT NULL,
 		       to_regclass('public.schema_migrations') IS NOT NULL,
 		       to_regclass('public.alembic_version') IS NOT NULL
@@ -147,10 +187,9 @@ func inspectLegacyHandoff(ctx context.Context, pool *pgxpool.Pool) (legacyHandof
 		if !schemaExists {
 			return noLegacyHandoff, errors.New("migration ledger exists without the Conbench schema")
 		}
-		if legacyLedgerExists {
-			return noLegacyHandoff, errors.New("database has both Go and legacy migration ledgers")
+		if !legacyLedgerExists {
+			return noLegacyHandoff, nil
 		}
-		return noLegacyHandoff, nil
 	}
 	if !schemaExists {
 		if legacyLedgerExists {
@@ -162,7 +201,7 @@ func inspectLegacyHandoff(ctx context.Context, pool *pgxpool.Pool) (legacyHandof
 		return noLegacyHandoff, errors.New("existing database has no recognized schema revision; restore a supported database backup before running this migrator")
 	}
 
-	rows, err := pool.Query(ctx, `SELECT version_num FROM public.alembic_version`)
+	rows, err := conn.Query(ctx, `SELECT version_num FROM public.alembic_version`)
 	if err != nil {
 		return noLegacyHandoff, fmt.Errorf("read legacy schema revision: %w", err)
 	}
@@ -183,6 +222,65 @@ func inspectLegacyHandoff(ctx context.Context, pool *pgxpool.Pool) (legacyHandof
 		strings.Join(revisions, ", "),
 		legacyBaselineRevision+", "+legacySubmissionRevision,
 	)
+}
+
+func prepareLegacyHandoff(
+	ctx context.Context,
+	conn *pgx.Conn,
+	driver migratedb.Driver,
+	migrator *migrate.Migrate,
+	handoff legacyHandoff,
+	latest int,
+) error {
+	version, dirty, err := driver.Version()
+	if err != nil {
+		return fmt.Errorf("read legacy handoff version: %w", err)
+	}
+	if version == migratedb.NilVersion {
+		if err := seedLegacyVersion(driver, handoff); err != nil {
+			return err
+		}
+		version = 1
+		if handoff == submissionLegacyHandoff {
+			version = 2
+		}
+	}
+	if version > latest {
+		return fmt.Errorf("legacy handoff migration version %d is newer than this binary (expects %d)", version, latest)
+	}
+	if dirty {
+		if version != 2 {
+			return fmt.Errorf("legacy handoff has unsupported dirty migration version %d", version)
+		}
+		if err := migrator.Force(1); err != nil {
+			return fmt.Errorf("reset interrupted legacy handoff: %w", err)
+		}
+		return nil
+	}
+
+	switch handoff {
+	case baselineLegacyHandoff:
+		if version < 1 {
+			return fmt.Errorf("legacy baseline handoff has invalid migration version %d", version)
+		}
+	case submissionLegacyHandoff:
+		switch version {
+		case 1:
+			return nil
+		case 2:
+			if err := verifyCurrentSchema(ctx, conn); err == nil {
+				return nil
+			} else if !errors.Is(err, errSubmissionSchemaIncomplete) {
+				return fmt.Errorf("inspect legacy submission schema: %w", err)
+			}
+			if err := migrator.Steps(-1); err != nil {
+				return fmt.Errorf("normalize legacy submission schema: %w", err)
+			}
+		default:
+			return fmt.Errorf("legacy submission handoff has invalid migration version %d", version)
+		}
+	}
+	return nil
 }
 
 func seedLegacyVersion(driver migratedb.Driver, handoff legacyHandoff) error {
@@ -222,10 +320,10 @@ func latestMigrationVersion() (int, error) {
 	return latest, nil
 }
 
-func verifyCurrentSchema(ctx context.Context, pool *pgxpool.Pool) error {
+func verifyCurrentSchema(ctx context.Context, conn *pgx.Conn) error {
 	const submissionConstraint = "CHECK ((((submission_key IS NULL) AND (submission_payload_sha256 IS NULL)) OR ((submission_key IS NOT NULL) AND (submission_payload_sha256 IS NOT NULL) AND (submission_payload_sha256 ~ '^[0-9a-f]{64}$'::text))))"
 	var keyColumn, hashColumn, constraintValid, indexValid bool
-	if err := pool.QueryRow(ctx, `
+	if err := conn.QueryRow(ctx, `
 		SELECT
 			EXISTS (
 				SELECT 1 FROM pg_attribute
@@ -268,7 +366,8 @@ func verifyCurrentSchema(ctx context.Context, pool *pgxpool.Pool) error {
 	}
 	if !keyColumn || !hashColumn || !constraintValid || !indexValid {
 		return fmt.Errorf(
-			"submission idempotency schema is incomplete (key column=%t, hash column=%t, constraint=%t, index=%t)",
+			"%w (key column=%t, hash column=%t, constraint=%t, index=%t)",
+			errSubmissionSchemaIncomplete,
 			keyColumn,
 			hashColumn,
 			constraintValid,
