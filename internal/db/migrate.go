@@ -340,7 +340,7 @@ func inspectLegacyHandoff(ctx context.Context, conn *pgx.Conn) (legacyHandoff, e
 		case legacyBaselineRevision:
 			return baselineLegacyHandoff, nil
 		case legacySubmissionRevision:
-			if err := validateLegacySubmissionData(ctx, conn); err != nil {
+			if err := validateLegacySubmissionCutover(ctx, conn); err != nil {
 				return noLegacyHandoff, err
 			}
 			return submissionLegacyHandoff, nil
@@ -353,23 +353,20 @@ func inspectLegacyHandoff(ctx context.Context, conn *pgx.Conn) (legacyHandoff, e
 	)
 }
 
-func validateLegacySubmissionData(ctx context.Context, conn *pgx.Conn) error {
-	var invalid bool
+func validateLegacySubmissionCutover(ctx context.Context, conn *pgx.Conn) error {
+	var legacyIdentityRows bool
 	if err := conn.QueryRow(ctx, `
 		SELECT EXISTS (
 			SELECT 1
 			FROM public.benchmark_result
 			WHERE submission_key IS NOT NULL
-			  AND (
-				submission_payload_sha256 IS NULL
-				OR submission_payload_sha256 !~ '^[0-9a-f]{64}$'
-			  )
+			   OR submission_payload_sha256 IS NOT NULL
 		)
-	`).Scan(&invalid); err != nil {
+	`).Scan(&legacyIdentityRows); err != nil {
 		return fmt.Errorf("inspect legacy submission idempotency data: %w", err)
 	}
-	if invalid {
-		return errors.New("legacy schema contains invalid submission idempotency data; repair keyed rows before migration")
+	if legacyIdentityRows {
+		return errors.New("legacy schema contains submission idempotency data that cannot be safely replayed; restore a supported pre-idempotency backup or use retained original inputs with a fresh database")
 	}
 	return nil
 }

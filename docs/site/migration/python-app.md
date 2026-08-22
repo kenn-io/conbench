@@ -22,6 +22,13 @@ server image before starting the application; the Go migrator serializes the
 embedded numbered SQL migrations and records their version and dirty state in
 `schema_migrations`.
 
+The `a6b7c8d9e0f1` cutover revision is accepted only when no result row contains
+a submission key or submission payload hash. Those values came from a retired
+client-owned hash contract that the normalized database rows cannot reproduce
+exactly. If the migrator reports such rows, restore a supported pre-idempotency
+backup or initialize a fresh database and publish retained original inputs after
+cutover. The migrator does not repair or delete legacy rows.
+
 ## Result Submission
 
 Each input file contains one Conbench result object. Existing Python benchmark
