@@ -104,6 +104,18 @@ func TestMigrateResumesDirtyLegacyHandoff(t *testing.T) {
 	applyInitialSchema(t, ctx, pool)
 	applyLegacySubmissionSchema(t, ctx, pool)
 	createLegacyRevision(t, ctx, pool, "a6b7c8d9e0f1")
+	insertBenchmarkDependencies(t, ctx, pool)
+	_, err := pool.Exec(ctx, `
+		INSERT INTO public.benchmark_result (
+			id, case_id, context_id, info_id, hardware_id, run_id, run_tags,
+			"timestamp", commit_repo_url, history_fingerprint,
+			submission_key, submission_payload_sha256
+		) VALUES (
+			'result-1', 'case-1', 'context-1', 'info-1', 'hardware-1', 'run-1', '{}',
+			now(), 'repo', 'fingerprint', 'legacy-key-without-hash', NULL
+		)
+	`)
+	require.NoError(t, err)
 	createMigrationLedger(t, ctx, pool, 2, true)
 
 	require.NoError(t, db.Migrate(ctx, pool))

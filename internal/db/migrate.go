@@ -252,8 +252,11 @@ func prepareLegacyHandoff(
 		if version != 2 {
 			return fmt.Errorf("legacy handoff has unsupported dirty migration version %d", version)
 		}
-		if err := migrator.Force(1); err != nil {
+		if err := migrator.Force(2); err != nil {
 			return fmt.Errorf("reset interrupted legacy handoff: %w", err)
+		}
+		if err := migrator.Steps(-1); err != nil {
+			return fmt.Errorf("clean interrupted legacy handoff: %w", err)
 		}
 		return nil
 	}
