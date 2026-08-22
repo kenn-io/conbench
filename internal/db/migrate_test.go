@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -70,6 +71,106 @@ func TestMigrateNormalizesLegacySubmissionRevision(t *testing.T) {
 		)
 	`)
 	require.Error(t, err, "the current constraint must reject a keyed result without a payload hash")
+}
+
+func TestMigratePreservesSubmissionUniquenessForLiveWriters(t *testing.T) {
+	pool, ctx := dbtest.NewEmptyPool(t)
+	prepareLiveSubmissionMigration(t, ctx, pool)
+	var indexOIDBefore int64
+	require.NoError(t, pool.QueryRow(ctx, `
+		SELECT 'public.benchmark_result_submission_key_index'::regclass::oid::bigint
+	`).Scan(&indexOIDBefore))
+
+	duplicates, migrationErr := migrateWhileRetryingSubmission(t, ctx, pool)
+	require.NoError(t, migrationErr)
+	assert.Zero(t, duplicates, "the migration must not expose a gap in submission-key uniqueness")
+	var indexOIDAfter int64
+	require.NoError(t, pool.QueryRow(ctx, `
+		SELECT 'public.benchmark_result_submission_key_index'::regclass::oid::bigint
+	`).Scan(&indexOIDAfter))
+	assert.Equal(t, indexOIDBefore, indexOIDAfter, "an existing correct index must be preserved")
+	assertCurrentMigration(t, ctx, pool)
+}
+
+func TestMigrateReplacesMismatchedSubmissionIndexWithoutUniquenessGap(t *testing.T) {
+	pool, ctx := dbtest.NewEmptyPool(t)
+	prepareLiveSubmissionMigration(t, ctx, pool)
+	_, err := pool.Exec(ctx, `
+		DROP INDEX public.benchmark_result_submission_key_index;
+		CREATE UNIQUE INDEX benchmark_result_submission_key_index
+			ON public.benchmark_result (submission_key)
+	`)
+	require.NoError(t, err)
+
+	duplicates, migrationErr := migrateWhileRetryingSubmission(t, ctx, pool)
+	require.NoError(t, migrationErr)
+	assert.Zero(t, duplicates, "replacing a mismatched index must retain submission-key uniqueness")
+	assertCurrentMigration(t, ctx, pool)
+}
+
+func migrateWhileRetryingSubmission(
+	t *testing.T,
+	ctx context.Context,
+	pool *pgxpool.Pool,
+) (int64, error) {
+	t.Helper()
+	const writerCount = 8
+	stop := make(chan struct{})
+	errs := make(chan error, writerCount)
+	var ready sync.WaitGroup
+	var firstAttempt sync.WaitGroup
+	var writerID atomic.Int64
+	var attempts atomic.Int64
+	var duplicates atomic.Int64
+	ready.Add(writerCount)
+	firstAttempt.Add(writerCount)
+	for range writerCount {
+		go func() {
+			ready.Done()
+			first := true
+			for {
+				select {
+				case <-stop:
+					errs <- nil
+					return
+				default:
+				}
+				id := writerID.Add(1)
+				tag, execErr := pool.Exec(ctx, `
+					INSERT INTO public.benchmark_result (
+						id, case_id, context_id, info_id, hardware_id, run_id, run_tags,
+						"timestamp", commit_repo_url, history_fingerprint,
+						submission_key, submission_payload_sha256
+					) VALUES (
+						'writer-result-' || ($1::bigint)::text, 'case-1', 'context-1', 'info-1',
+						'hardware-1', 'writer-run-' || ($1::bigint)::text, '{}', now(), 'repo',
+						'writer-fingerprint-' || ($1::bigint)::text, 'live-key', repeat('b', 64)
+					)
+					ON CONFLICT DO NOTHING
+				`, id)
+				attempts.Add(1)
+				if first {
+					firstAttempt.Done()
+					first = false
+				}
+				if execErr != nil {
+					errs <- execErr
+					return
+				}
+				duplicates.Add(tag.RowsAffected())
+			}
+		}()
+	}
+	ready.Wait()
+	firstAttempt.Wait()
+	require.GreaterOrEqual(t, attempts.Load(), int64(writerCount))
+
+	migrationErr := db.Migrate(ctx, pool)
+	close(stop)
+	for range writerCount {
+		require.NoError(t, <-errs)
+	}
+	return duplicates.Load(), migrationErr
 }
 
 func TestMigrateSerializesConcurrentLegacyHandoff(t *testing.T) {
@@ -301,6 +402,39 @@ func applyLegacySubmissionSchema(t *testing.T, ctx context.Context, pool *pgxpoo
 			WHERE submission_key IS NOT NULL
 	`)
 	require.NoError(t, err)
+}
+
+func prepareLiveSubmissionMigration(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+	t.Helper()
+	applyInitialSchema(t, ctx, pool)
+	applyLegacySubmissionSchema(t, ctx, pool)
+	insertBenchmarkDependencies(t, ctx, pool)
+	_, err := pool.Exec(ctx, `
+		INSERT INTO public.benchmark_result (
+			id, case_id, context_id, info_id, hardware_id, run_id, run_tags,
+			"timestamp", commit_repo_url, history_fingerprint,
+			submission_key, submission_payload_sha256
+		)
+		SELECT
+			'load-result-' || sequence, 'case-1', 'context-1', 'info-1',
+			'hardware-1', 'load-run-' || sequence, '{}', now(), 'repo',
+			'load-fingerprint-' || sequence, 'load-key-' || sequence, repeat('a', 64)
+		FROM generate_series(1, 50000) AS sequence
+	`)
+	require.NoError(t, err)
+	_, err = pool.Exec(ctx, `
+		INSERT INTO public.benchmark_result (
+			id, case_id, context_id, info_id, hardware_id, run_id, run_tags,
+			"timestamp", commit_repo_url, history_fingerprint,
+			submission_key, submission_payload_sha256
+		) VALUES (
+			'live-result', 'case-1', 'context-1', 'info-1', 'hardware-1',
+			'live-run', '{}', now(), 'repo', 'live-fingerprint',
+			'live-key', repeat('b', 64)
+		)
+	`)
+	require.NoError(t, err)
+	createLegacyRevision(t, ctx, pool, "a6b7c8d9e0f1")
 }
 
 func createLegacyRevision(t *testing.T, ctx context.Context, pool *pgxpool.Pool, revision string) {

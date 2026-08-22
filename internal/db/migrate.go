@@ -25,6 +25,8 @@ const (
 	legacySubmissionRevision = "a6b7c8d9e0f1"
 	migrationTableName       = "schema_migrations"
 	migrationHandoffLockID   = int64(0x636f6e62656e6368)
+	submissionIndexName      = "benchmark_result_submission_key_index"
+	submissionIndexGuardName = "benchmark_result_submission_key_migration_guard"
 )
 
 var errSubmissionSchemaIncomplete = errors.New("submission idempotency schema is incomplete")
@@ -118,6 +120,11 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) (returnErr error) {
 			latest,
 		)
 	}
+	if version == 1 {
+		if err := prepareSubmissionIndex(ctx, lockConn.Conn()); err != nil {
+			return fmt.Errorf("prepare submission idempotency index: %w", err)
+		}
+	}
 
 	if err := migrator.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
 		return fmt.Errorf("apply migrations: %w", err)
@@ -138,6 +145,125 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) (returnErr error) {
 		}
 	}
 	return nil
+}
+
+type submissionIndexState int
+
+const (
+	submissionIndexMissing submissionIndexState = iota
+	submissionIndexCorrect
+	submissionIndexMismatched
+)
+
+func prepareSubmissionIndex(ctx context.Context, conn *pgx.Conn) error {
+	var keyColumnExists bool
+	if err := conn.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM pg_attribute
+			WHERE attrelid = 'public.benchmark_result'::regclass
+			  AND attname = 'submission_key'
+			  AND NOT attisdropped
+		)
+	`).Scan(&keyColumnExists); err != nil {
+		return fmt.Errorf("inspect submission key column: %w", err)
+	}
+	if !keyColumnExists {
+		return nil
+	}
+
+	canonical, err := inspectSubmissionIndex(ctx, conn, submissionIndexName)
+	if err != nil {
+		return err
+	}
+	guard, err := inspectSubmissionIndex(ctx, conn, submissionIndexGuardName)
+	if err != nil {
+		return err
+	}
+	if canonical == submissionIndexCorrect {
+		switch guard {
+		case submissionIndexMissing:
+			return nil
+		case submissionIndexCorrect:
+			if _, err := conn.Exec(ctx, `
+				DROP INDEX CONCURRENTLY public.benchmark_result_submission_key_migration_guard
+			`); err != nil {
+				return fmt.Errorf("remove redundant submission index guard: %w", err)
+			}
+			return nil
+		default:
+			return errors.New("submission index migration guard is mismatched; remove it before migration")
+		}
+	}
+	if guard == submissionIndexMismatched {
+		return errors.New("submission index migration guard is mismatched; remove it before migration")
+	}
+	if guard == submissionIndexMissing {
+		if _, err := conn.Exec(ctx, `
+			CREATE UNIQUE INDEX CONCURRENTLY benchmark_result_submission_key_migration_guard
+				ON public.benchmark_result (submission_key)
+				WHERE submission_key IS NOT NULL
+		`); err != nil {
+			return fmt.Errorf("create submission index migration guard: %w", err)
+		}
+		guard, err = inspectSubmissionIndex(ctx, conn, submissionIndexGuardName)
+		if err != nil {
+			return err
+		}
+	}
+	if guard != submissionIndexCorrect {
+		return errors.New("submission index migration guard is incomplete")
+	}
+	if canonical == submissionIndexMismatched {
+		if _, err := conn.Exec(ctx, `
+			DROP INDEX CONCURRENTLY public.benchmark_result_submission_key_index
+		`); err != nil {
+			return fmt.Errorf("remove mismatched submission index: %w", err)
+		}
+	}
+	if _, err := conn.Exec(ctx, `
+		ALTER INDEX public.benchmark_result_submission_key_migration_guard
+			RENAME TO benchmark_result_submission_key_index
+	`); err != nil {
+		return fmt.Errorf("install submission index migration guard: %w", err)
+	}
+	return nil
+}
+
+func inspectSubmissionIndex(ctx context.Context, conn *pgx.Conn, name string) (submissionIndexState, error) {
+	qualifiedName := "public." + name
+	var exists, correct bool
+	if err := conn.QueryRow(ctx, `
+		SELECT
+			to_regclass($1) IS NOT NULL,
+			EXISTS (
+				SELECT 1
+				FROM pg_index AS i
+				JOIN pg_class AS idx ON idx.oid = i.indexrelid
+				JOIN pg_am AS am ON am.oid = idx.relam
+				LEFT JOIN pg_attribute AS a
+				  ON a.attrelid = i.indrelid AND a.attnum = i.indkey[0]
+				WHERE i.indexrelid = to_regclass($1)
+				  AND i.indrelid = 'public.benchmark_result'::regclass
+				  AND i.indisunique
+				  AND i.indisvalid
+				  AND i.indisready
+				  AND i.indnkeyatts = 1
+				  AND i.indnatts = 1
+				  AND am.amname = 'btree'
+				  AND a.attname = 'submission_key'
+				  AND pg_get_expr(i.indpred, i.indrelid) = '(submission_key IS NOT NULL)'
+			)
+	`, qualifiedName).Scan(&exists, &correct); err != nil {
+		return submissionIndexMissing, fmt.Errorf("inspect submission index %s: %w", name, err)
+	}
+	switch {
+	case correct:
+		return submissionIndexCorrect, nil
+	case exists:
+		return submissionIndexMismatched, nil
+	default:
+		return submissionIndexMissing, nil
+	}
 }
 
 func acquireMigrationLock(ctx context.Context, pool *pgxpool.Pool) (*pgxpool.Conn, error) {

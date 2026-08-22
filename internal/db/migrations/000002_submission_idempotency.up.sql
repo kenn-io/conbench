@@ -16,9 +16,7 @@ ALTER TABLE public.benchmark_result
         )
     ) NOT VALID;
 
-DROP INDEX CONCURRENTLY IF EXISTS public.benchmark_result_submission_key_index;
-
-CREATE UNIQUE INDEX CONCURRENTLY benchmark_result_submission_key_index
+CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS benchmark_result_submission_key_index
     ON public.benchmark_result (submission_key)
     WHERE submission_key IS NOT NULL;
 
