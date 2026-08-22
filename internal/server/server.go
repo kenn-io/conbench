@@ -155,21 +155,12 @@ func firstString(values []string) string {
 	return values[0]
 }
 
-// EnsureSchema applies the embedded schema when the database has no
-// benchmark_result table yet, and is a no-op otherwise, so `make dev` can run
-// repeatedly against a persistent volume. It is a development convenience;
-// production schema changes go through Alembic (scripts/gen_schema.sh), of which
-// the embedded schema.sql is the committed, drift-checked output.
+// EnsureSchema applies the numbered migrations embedded in the Go binary to a
+// development database. Production deployments invoke the same migrator
+// through `conbench migrate` before starting the server.
 func EnsureSchema(ctx context.Context, pool *pgxpool.Pool) error {
-	var reg *string
-	if err := pool.QueryRow(ctx, "SELECT to_regclass('public.benchmark_result')::text").Scan(&reg); err != nil {
-		return fmt.Errorf("check schema: %w", err)
-	}
-	if reg != nil {
-		return nil
-	}
-	if _, err := pool.Exec(ctx, db.SchemaSQL); err != nil {
-		return fmt.Errorf("apply schema: %w", err)
+	if err := db.Migrate(ctx, pool); err != nil {
+		return fmt.Errorf("migrate schema: %w", err)
 	}
 	return nil
 }

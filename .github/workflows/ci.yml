@@ -2,9 +2,9 @@ name: ci
 
 on:
   pull_request:
-    branches: [main, new-vision]
+    branches: [main, new-vision, experimental-v2]
   push:
-    branches: [main, new-vision]
+    branches: [main, new-vision, experimental-v2]
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -21,6 +21,7 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
         with:
           go-version-file: go.mod
@@ -34,6 +35,9 @@ jobs:
           tar -xzf golangci-lint-2.12.2-linux-amd64.tar.gz
           sudo install golangci-lint-2.12.2-linux-amd64/golangci-lint /usr/local/bin/golangci-lint
           golangci-lint version
+      - run: make migration-history-check
+        env:
+          CONBENCH_MIGRATION_BASE_REF: ${{ github.event.before }}
       - run: make go-lint-ci
       - run: make go-vet
       - run: make go-test
@@ -56,21 +60,6 @@ jobs:
       - run: bun run check:e2e
       - run: bun run check:docs-screenshots
       - run: bun run test
-
-  sdk-python:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          persist-credentials: false
-      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
-        with:
-          version: "0.9.2"
-          enable-cache: true
-      - run: cd sdk/python && uv python install 3.12
-      - run: make python-sdk-check
-      - run: make migration-examples-test
 
   docs:
     runs-on: ubuntu-latest
@@ -117,15 +106,6 @@ jobs:
           CONBENCH_DOCS_SCREENSHOT_OUT_DIR: ${{ runner.temp }}/conbench-dashboard-screenshots
           GITHUB_TOKEN: ${{ github.token }}
         run: scripts/publish_docs_screenshot_artifacts.sh
-
-  schema-drift:
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          persist-credentials: false
-      - run: make schema-check
 
   codegen-drift:
     runs-on: ubuntu-latest
@@ -208,7 +188,6 @@ jobs:
         with:
           version: "0.9.2"
           enable-cache: true
-      - run: make workflow-shape-check
       - run: make docs-link-check
       - run: make docs-screenshots-check
 

@@ -7,15 +7,15 @@ Flask/Jinja application and old Python package stack.
 The migration goal is to preserve useful jobs, data, and analysis behavior, not
 old route names, import paths, or password-era operational patterns. Existing
 deployments should migrate to the documented Go API, Svelte dashboard, Go CLI,
-generated SDKs, and server-owned alerting surfaces.
+generated Go client, and server-owned alerting surfaces.
 
 ## Principles
 
 - Keep the frozen Postgres schema readable while moving product behavior into
   the Go server and Svelte dashboard.
 - Use the `conbench` CLI as the canonical write and CI path.
-- Use generated SDKs for reads and automation, not hand-maintained password
-  clients.
+- Use the HTTP API or generated Go client for reads and automation, not
+  hand-maintained password clients.
 - Replace legacy dashboard jobs with new dashboard workflows when the job is
   still useful.
 - Retire low-value catalogs, cache-era views, and source-compatible Python imports
@@ -28,12 +28,12 @@ generated SDKs, and server-owned alerting surfaces.
 
 | Legacy job | New supported path |
 | --- | --- |
-| Submit benchmark results with `benchconnect` or direct POST helpers | Write one result object per JSON file and run `conbench results submit`; Python jobs may use `conbench.migration` for payload-file writing and CLI invocation. Follow the [migration guide](python-app.md) and the runnable [`examples/migration/gbench_to_cli_submit.py`](https://github.com/conbench/conbench/blob/main/examples/migration/gbench_to_cli_submit.py) recipe. |
+| Submit benchmark results with `benchconnect` or direct POST helpers | Write one result object per JSON file and run `conbench results submit`. Follow the [migration guide](python-app.md). |
 | Run PR regression checks with `benchalerts` | Run `conbench ci report`, publish Markdown through CI, use its exit code for status, and enable `--github-check --github-pr-comment` when the repository still needs GitHub App output. |
 | Deliver scheduled alert notifications from Python | Use server alert rules, `conbench admin alerts evaluate`, and `conbench admin alerts deliver` for webhook, Slack, GitHub Check, GitHub commit-comment, or email delivery. |
 | Browse recent runs from the Flask landing page | Use the Svelte home dashboard, run pages, batch pages, CI report links, and sample result links. |
 | Inspect one result from `/benchmark-results/{id}/` or `/benchmarks/{id}/` | Use `/results/{id}` or `/benchmark-results/{id}` with raw metadata, history JSON, validation, hardware, run, commit, and authenticated result actions. |
-| Browse submitted results | Use `/results`, `/api/benchmark-results?...`, generated SDK list operations, run pages, and batch pages. |
+| Browse submitted results | Use `/results`, `/api/benchmark-results?...`, HTTP or Go-client list operations, run pages, and batch pages. |
 | Inspect a run or batch page | Use `/runs/<run_id>` and `/batches/<batch_id>`, backed by result-list filters and CI report links. |
 | Download history CSV | Use `conbench history export <result-id>`; dashboard pages expose JSON history and copyable export commands. |
 | Compare two result IDs | Use `/compare?baseline=<id>&contender=<id>` or the compare API, with stricter same-fingerprint semantics. |
@@ -45,7 +45,7 @@ generated SDKs, and server-owned alerting surfaces.
 
 | Retired surface | Reason |
 | --- | --- |
-| Source-compatible `benchadapt`, `benchconnect`, `benchclients`, `benchrun`, `benchalerts`, and `conbenchlegacy` imports | They would preserve the old client design and maintenance burden. Migration uses JSON payloads, the Go CLI, generated SDKs, and documented examples. |
+| Source-compatible `benchadapt`, `benchconnect`, `benchclients`, `benchrun`, `benchalerts`, and `conbenchlegacy` imports | They would preserve the old client design and maintenance burden. Migration uses JSON payloads, the Go CLI, HTTP, and the generated Go client. |
 | Password login, registration keys, and arbitrary user CRUD pages | Human auth is OIDC-based. User-owned API tokens and alert rules are self-service under `/account`. Future operator administration should be a new authenticated admin feature. |
 | Standalone hardware, commits, contexts, and info catalogs | The useful data appears inside result, series, trend, run, batch, and CI workflows. Standalone catalogs did not justify route compatibility. |
 | Loose cross-fingerprint result comparison | The new compare path expects the same history fingerprint so pairwise and lookback analysis describe the same benchmark series. |
@@ -69,7 +69,7 @@ may deserve new product work if users need them.
 
 When a legacy parity request appears, classify it before building:
 
-1. Is the user job already covered by a documented Go/Svelte/CLI/SDK path?
+1. Is the user job already covered by a documented Go/Svelte/CLI/API path?
 2. If not, is the job still useful in the new product, or was it only an old
    implementation artifact?
 3. Can it work at production scale without reviving the old cache or Python

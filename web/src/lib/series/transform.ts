@@ -30,6 +30,9 @@ export interface SeriesPoint {
   measurements: number[];
   svs: number;
   unit: string | null;
+  runTags: Record<string, unknown>;
+  info: Record<string, unknown>;
+  changeAnnotations: Record<string, unknown>;
   stats: PointStats;
 }
 
@@ -70,18 +73,25 @@ function sampleMeasurements(sample: HistorySample): number[] {
 }
 
 export function toSeriesPoints(samples: HistorySample[]): SeriesPoint[] {
-  return samples.map((s) => ({
-    resultId: s.benchmark_result_id,
-    commitHash: s.commit_hash,
-    commitMessage: s.commit_message,
-    commitTimestampMs: toMs(s.commit_timestamp),
-    resultTimestampMs: Date.parse(s.result_timestamp),
-    chartMs: Date.parse(s.commit_timestamp ?? s.result_timestamp),
-    measurements: sampleMeasurements(s),
-    svs: s.single_value_summary,
-    unit: s.unit,
-    stats: toPointStats(s.zscorestats),
-  }));
+  return samples.map((s) => {
+    const stats = toPointStats(s.zscorestats);
+    stats.beginsChange ||= s.change_annotations["begins_distribution_change"] === true;
+    return {
+      resultId: s.benchmark_result_id,
+      commitHash: s.commit_hash,
+      commitMessage: s.commit_message,
+      commitTimestampMs: toMs(s.commit_timestamp),
+      resultTimestampMs: Date.parse(s.result_timestamp),
+      chartMs: Date.parse(s.commit_timestamp ?? s.result_timestamp),
+      measurements: sampleMeasurements(s),
+      svs: s.single_value_summary,
+      unit: s.unit,
+      runTags: s.run_tags,
+      info: s.info,
+      changeAnnotations: s.change_annotations,
+      stats,
+    };
+  });
 }
 
 export interface TableRow {
@@ -230,6 +240,30 @@ export function segmentSpans(points: SeriesPoint[]): SegmentSpan[] {
 export interface TrendTooltip {
   title: string;
   lines: string[];
+  metadata: string[];
+}
+
+const metadataDisplayLimit = 6;
+
+function metadataValue(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value === null || typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  return JSON.stringify(value) ?? String(value);
+}
+
+function boundaryMetadata(p: SeriesPoint): string[] {
+  if (p.changeAnnotations["begins_distribution_change"] !== true) return [];
+  const entries = [
+    ...Object.entries(p.runTags).map(([key, value]) => `run: ${key}=${metadataValue(value)}`),
+    ...Object.entries(p.info).map(([key, value]) => `info: ${key}=${metadataValue(value)}`),
+  ].sort();
+  if (entries.length <= metadataDisplayLimit) return entries;
+  return [
+    ...entries.slice(0, metadataDisplayLimit),
+    `… +${entries.length - metadataDisplayLimit} more`,
+  ];
 }
 
 /** pointTooltip is the hover view-model. The title keeps the walking-skeleton
@@ -254,6 +288,7 @@ export function pointTooltip(p: SeriesPoint, locale?: string): TrendTooltip {
   return {
     title: `${p.commitHash} · ${formatMeasurement(p.svs, p.unit)}`,
     lines,
+    metadata: boundaryMetadata(p),
   };
 }
 

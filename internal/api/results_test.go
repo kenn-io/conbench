@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -59,10 +60,12 @@ func TestPostResultsCreates(t *testing.T) {
 	require.Equal(t, http.StatusCreated, resp.Code, "body = %s", resp.Body.String())
 	var out struct {
 		ID                 string `json:"id"`
+		RunID              string `json:"run_id"`
 		HistoryFingerprint string `json:"history_fingerprint"`
 	}
 	require.NoError(t, json.Unmarshal(resp.Body.Bytes(), &out))
 	require.NotEmpty(t, out.ID, "missing fields in response: %s", resp.Body.String())
+	assert.Equal(t, "run-1", out.RunID)
 	require.NotEmpty(t, out.HistoryFingerprint, "missing fields in response: %s", resp.Body.String())
 
 	// The result actually landed in the frozen schema.
@@ -71,6 +74,36 @@ func TestPostResultsCreates(t *testing.T) {
 	if row.Unit == nil || *row.Unit != "s" || len(row.Data) != 3 || row.CommitID == nil {
 		assert.Failf(t, "stored row mismatch", "unit=%v data=%v commit=%v", row.Unit, row.Data, row.CommitID)
 	}
+}
+
+func TestPostResultsSubmissionConflictReturns409(t *testing.T) {
+	tapi, _, _ := newAPI(t)
+	body := validBody()
+	body["submission_key"] = "publisher-0000000000000001"
+	first := tapi.Post("/api/results", "Authorization: Bearer "+testToken, body)
+	require.Equal(t, http.StatusCreated, first.Code, "body = %s", first.Body.String())
+	second := tapi.Post("/api/results", "Authorization: Bearer "+testToken, body)
+	require.Equal(t, http.StatusCreated, second.Code, "body = %s", second.Body.String())
+	var firstResult, secondResult struct {
+		ID string `json:"id"`
+	}
+	require.NoError(t, json.Unmarshal(first.Body.Bytes(), &firstResult))
+	require.NoError(t, json.Unmarshal(second.Body.Bytes(), &secondResult))
+	assert.Equal(t, firstResult.ID, secondResult.ID)
+
+	changed := validBody()
+	changed["submission_key"] = body["submission_key"]
+	changed["stats"] = map[string]any{"data": []float64{4, 5, 6}, "unit": "s"}
+	conflict := tapi.Post("/api/results", "Authorization: Bearer "+testToken, changed)
+	assert.Equal(t, http.StatusConflict, conflict.Code, "body = %s", conflict.Body.String())
+}
+
+func TestPostResultsRejectsOversizedSubmissionKey(t *testing.T) {
+	tapi, _, _ := newAPI(t)
+	body := validBody()
+	body["submission_key"] = strings.Repeat("x", 256)
+	resp := tapi.Post("/api/results", "Authorization: Bearer "+testToken, body)
+	assert.Equal(t, http.StatusUnprocessableEntity, resp.Code, "body = %s", resp.Body.String())
 }
 
 // TestPostResultsGithubBranchAndPRNumber pins the new wire fields: explicit

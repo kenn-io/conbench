@@ -4,7 +4,7 @@
 //
 //	CONBENCH_DB_URL        Postgres URL (or DATABASE_URL). Required.
 //	CONBENCH_ADDR          Listen address. Default ":8080".
-//	CONBENCH_INIT_SCHEMA   "true" applies the embedded schema if missing (dev).
+//	CONBENCH_INIT_SCHEMA   "true" applies embedded numbered migrations (dev).
 //	CONBENCH_SEED          "true" seeds deterministic demo data (idempotent).
 //	CONBENCH_SEED_DEV_TOKEN When set, get-or-creates a dev user and a user-attributed
 //	                       api_token whose hash is HashToken(value), so dev/e2e can

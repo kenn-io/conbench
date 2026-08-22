@@ -86,23 +86,5 @@ Then write `payload` as JSON and submit with the CLI. Do not port password-login
 HTTP submission code into new benchmark suites.
 
 For package-by-package migration guidance, read the
-[Python app migration guide](migration/python-app.md). For a runnable migration
-example, see
-[`examples/migration/gbench_to_cli_submit.py`](https://github.com/conbench/conbench/blob/main/examples/migration/gbench_to_cli_submit.py).
-It transforms a saved Google Benchmark JSON fixture into Conbench payloads,
-fills run and GitHub metadata, uses `conbench.migration` for
-payload-file writing and CLI submission, preserves the fixture timestamp when
-Google Benchmark provides one, redacts tokens from dry-run output, prints the
-dry-run submit command without a `--token` argument, and can optionally call
-`conbench results submit` followed by `conbench ci report`. Both subprocesses
-receive the API token through `CONBENCH_TOKEN`, not an argv flag.
-
-From a source checkout, run the example with the SDK source on `PYTHONPATH`:
-
-```bash
-PYTHONPATH=sdk/python python3 examples/migration/gbench_to_cli_submit.py \
-  --out-dir /tmp/conbench-gbench-payloads \
-  --repository https://github.com/example/project \
-  --commit abc123 \
-  --run-id demo-run
-```
+[Python application migration guide](migration/python-app.md). It keeps the
+boundary explicit: benchmark code writes JSON, then invokes the Go CLI.

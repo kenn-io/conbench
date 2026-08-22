@@ -1,7 +1,7 @@
 [project]
 site_name = "Conbench"
 site_url = "https://conbench.github.io/conbench/"
-site_description = "Language-independent continuous benchmarking with a Go API, Svelte dashboard, CLI-first writes, and generated SDKs."
+site_description = "Language-independent continuous benchmarking with a Go API, Svelte dashboard, CLI-first writes, and generated clients."
 site_author = "Conbench maintainers"
 docs_dir = "docs/site"
 site_dir = "site"
@@ -27,7 +27,6 @@ nav = [
     "migration/python-app.md",
     "migration/arrow-workflows.md",
     "migration/aws-parallel-evaluation.md",
-    "migration/python-legacy-reference.md",
     "migration/legacy-parity-roadmap.md",
     "migration/deprecation-notices.md",
   ] },

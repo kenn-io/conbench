@@ -1,7 +1,7 @@
 # Temporary Production-Clone Migration Gate
 
 Use this temporary migration gate with a production-derived Postgres clone to
-prove that the Go server, Svelte dashboard, CLI, and generated SDK can read an
+prove that the Go server, Svelte dashboard, and CLI can read an
 existing Conbench deployment before any storage-model change. The gate is
 local-only and read-only. It is for migration confidence and sanitized scale
 evidence, not for normal Conbench product workflow or committed deployment
@@ -21,7 +21,6 @@ runtime:
   report paths,
 - the CLI can read the same server with `results get`, `series list`, and
   `compare`,
-- the generated Python SDK can import and make basic read calls,
 - writable table counts do not change,
 - server logs do not contain blocked-write or read-only transaction errors.
 
@@ -113,7 +112,6 @@ legacy Postgres clone in the 100M-result-row class.
 - API read probes passed for series list, benchmark result list/detail, history
   by result, history by fingerprint, benchmark-result compare, and CI report.
 - CLI read probes passed for `results get`, `series list`, and `compare`.
-- Python SDK smoke probes passed against the local server.
 - Writable-table row-count comparison reported no changes.
 - Server log scanning found zero blocked-write findings.
 

@@ -295,14 +295,15 @@ type CIReportRun struct {
 
 // CIReportSide defines model for CIReportSide.
 type CIReportSide struct {
-	CommitSha              *string                 `json:"commit_sha"`
-	CommitTimestamp        *time.Time              `json:"commit_timestamp"`
-	Error                  *map[string]interface{} `json:"error"`
-	ResultId               string                  `json:"result_id"`
-	ResultTimestamp        time.Time               `json:"result_timestamp"`
-	RunId                  string                  `json:"run_id"`
-	SingleValueSummary     *float64                `json:"single_value_summary"`
-	SingleValueSummaryType string                  `json:"single_value_summary_type"`
+	BeginsDistributionChange bool                    `json:"begins_distribution_change"`
+	CommitSha                *string                 `json:"commit_sha"`
+	CommitTimestamp          *time.Time              `json:"commit_timestamp"`
+	Error                    *map[string]interface{} `json:"error"`
+	ResultId                 string                  `json:"result_id"`
+	ResultTimestamp          time.Time               `json:"result_timestamp"`
+	RunId                    string                  `json:"run_id"`
+	SingleValueSummary       *float64                `json:"single_value_summary"`
+	SingleValueSummaryType   string                  `json:"single_value_summary_type"`
 }
 
 // CIReportSummary defines model for CIReportSummary.
@@ -473,19 +474,22 @@ type HealthOutputBody struct {
 
 // HistorySample defines model for HistorySample.
 type HistorySample struct {
-	BenchmarkResultId      string       `json:"benchmark_result_id"`
-	CommitHash             string       `json:"commit_hash"`
-	CommitMessage          string       `json:"commit_message"`
-	CommitRepository       string       `json:"commit_repository"`
-	CommitTimestamp        *time.Time   `json:"commit_timestamp"`
-	Data                   *[]float64   `json:"data"`
-	HardwareHash           string       `json:"hardware_hash"`
-	Mean                   *float64     `json:"mean"`
-	ResultTimestamp        time.Time    `json:"result_timestamp"`
-	SingleValueSummary     float64      `json:"single_value_summary"`
-	SingleValueSummaryType string       `json:"single_value_summary_type"`
-	Unit                   *string      `json:"unit"`
-	Zscorestats            *ZScoreStats `json:"zscorestats"`
+	BenchmarkResultId      string                 `json:"benchmark_result_id"`
+	ChangeAnnotations      map[string]interface{} `json:"change_annotations"`
+	CommitHash             string                 `json:"commit_hash"`
+	CommitMessage          string                 `json:"commit_message"`
+	CommitRepository       string                 `json:"commit_repository"`
+	CommitTimestamp        *time.Time             `json:"commit_timestamp"`
+	Data                   *[]float64             `json:"data"`
+	HardwareHash           string                 `json:"hardware_hash"`
+	Info                   map[string]interface{} `json:"info"`
+	Mean                   *float64               `json:"mean"`
+	ResultTimestamp        time.Time              `json:"result_timestamp"`
+	RunTags                map[string]interface{} `json:"run_tags"`
+	SingleValueSummary     float64                `json:"single_value_summary"`
+	SingleValueSummaryType string                 `json:"single_value_summary_type"`
+	Unit                   *string                `json:"unit"`
+	Zscorestats            *ZScoreStats           `json:"zscorestats"`
 }
 
 // HistorySeries defines model for HistorySeries.
@@ -738,6 +742,7 @@ type SubmitOutputBody struct {
 	Schema             *string `json:"$schema,omitempty"`
 	HistoryFingerprint string  `json:"history_fingerprint"`
 	Id                 string  `json:"id"`
+	RunId              string  `json:"run_id"`
 }
 
 // SubmitRequest defines model for SubmitRequest.
@@ -758,6 +763,7 @@ type SubmitRequest struct {
 	RunReason             *string                 `json:"run_reason,omitempty"`
 	RunTags               *map[string]interface{} `json:"run_tags,omitempty"`
 	Stats                 *StatsInput             `json:"stats,omitempty"`
+	SubmissionKey         *string                 `json:"submission_key,omitempty"`
 	Tags                  map[string]interface{}  `json:"tags"`
 	Timestamp             time.Time               `json:"timestamp"`
 	Validation            *map[string]interface{} `json:"validation,omitempty"`

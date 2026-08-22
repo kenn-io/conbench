@@ -49,7 +49,7 @@ Use a staged combination, not a single large storage rewrite.
    measured correctness, latency, and operations gates pass. Writes remain
    Postgres-backed until result identity, atomic metadata/fact linkage,
    recovery, deletes, and rollback are designed and tested.
-6. Keep the public API, CLI, Python SDK, and JSON payload contract stable while
+6. Keep the public API, CLI, Go client, and JSON payload contract stable while
    the storage backend changes behind service interfaces.
 
 This decision makes the next storage work a proof, not a production cutover.
@@ -81,9 +81,8 @@ Existing deployments should be able to move in stages:
 2. Run the new Go server and Svelte app against the frozen schema.
 3. Validate read compatibility with the production-clone harness and browser
    probes.
-4. Point benchmark submitters at the new `conbench` CLI, with optional
-   `conbench.migration` helpers for Python jobs that need payload-file writing,
-   without changing the result JSON contract.
+4. Point benchmark submitters at the new `conbench` CLI without changing the
+   result JSON contract.
 5. Add the analytical replica as an optional read-side component.
 6. Shadow selected read paths against both Postgres and the replica.
 7. Switch individual read-heavy interfaces only after shadow reads match and

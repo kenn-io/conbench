@@ -1,7 +1,7 @@
 # Contributing
 
 Conbench is maintained as a Go backend, Svelte dashboard, CLI-first write path,
-generated SDKs, and Markdown/Zensical documentation.
+generated Go and TypeScript clients, and Markdown/Zensical documentation.
 
 ## Core Commands
 
@@ -12,9 +12,6 @@ make go-test
 make sqlc-check
 make codegen-check
 make build
-make python-sdk-check
-make migration-examples-test
-make repo-hygiene-check
 make docs-link-check
 make build-docs
 ```
@@ -31,32 +28,12 @@ The maintained source tree should stay explainable from the repository root:
   and frontend tests.
 - `api/` contains generated OpenAPI contract artifacts reviewed with codegen
   changes and exposed by the server.
-- `sdk/` contains generated Go and Python SDKs. The Python SDK package is
-  `conbench`; small hand-written helpers live in overlay files that are copied
-  into the generated package by codegen.
+- `sdk/` contains the generated Go client.
 - `docs/site/` contains the public Markdown/Zensical documentation. Durable
   product, migration, and operations decisions belong there.
-- `examples/migration/` contains runnable migration recipes for old Python
-  benchmark publishers moving to JSON payload files and the Go CLI.
 - `scripts/`, `k8s/`, Dockerfiles, and Compose files contain local checks,
   packaging, smoke-test, and deploy-rendering support for the single
   `conbench` binary.
-
-`make repo-hygiene-check` verifies that retired top-level Python package paths,
-single-file module names, and root Python application configuration files stay
-untracked. The remaining tracked Python files are intentionally scoped to
-schema migrations, generated SDK packaging, migration examples, and
-repository/documentation checks. The same check parses those active Python
-files and rejects imports from retired legacy packages such as `benchadapt`,
-`benchconnect`, `benchalerts`, `benchclients`, `benchrun`, `conbenchlegacy`,
-and `conbench_client`.
-It also rejects split command directories such as `cmd/conbench-server` and
-`cmd/conbench-openapi`; the maintained runtime and CLI surface belongs in the
-single `conbench` binary.
-`scripts/retired_python_surfaces.py` is the shared source of truth for
-retired Python package names, single-file module names, and path prefixes;
-update that file rather than duplicating package lists in workflow, repo, or
-artifact-hygiene checks.
 
 ## Generated Artifacts
 
@@ -76,18 +53,14 @@ make sqlc
 Do not hand-edit generated client or sqlc files unless you are intentionally
 testing generator output and will regenerate before committing.
 
-The Python SDK has one exception: small hand-written helpers live under
-`sdk/python/overlays/conbench/` and are copied into the generated
-`sdk/python/conbench/` package by `make codegen-py`. The expected overlay files
-are listed in `sdk/python/overlays/manifest.txt`; all package paths ever owned
-by the overlay system are listed in `sdk/python/overlays/managed-targets.txt`
-so retired helpers cannot remain packaged by accident. Edit the overlay source
-first, update both lists when adding or retiring an overlay file, then
-regenerate or copy it into the package. `make python-sdk-check` fails if the
-overlay source and packaged copy drift.
-The same package check builds the Python SDK wheel and sdist, then rejects
-retired package directories and single-file modules from built wheel and sdist
-artifacts before running clean-install smoke tests.
+## Database Migrations
+
+Number migrations sequentially under `internal/db/migrations` and provide
+matching `.up.sql` and `.down.sql` files. After the initial history bootstrap,
+a pull request adds at most one migration; amend that migration before it ships,
+and never edit migration files already present on the target branch. Run
+`make migration-history-check` before committing. sqlc reads the same migration
+directory, so schema changes and query generation have one source of truth.
 
 ## Documentation
 
@@ -103,7 +76,7 @@ make docs-serve
 
 `make docs-link-check` checks local links, heading anchors, documented Makefile
 target references, documented frontend package script references, migration
-coverage for the public migration pages, API and SDK page, SDK README, and root
+coverage for the public migration pages, API and client page, and root
 README, and Zensical navigation coverage. Every Markdown page under
 `docs/site/` should be reachable from `zensical.toml` unless the checker has an
 explicit reason to exclude it.
@@ -122,7 +95,7 @@ archive. Move decisions worth preserving into `docs/site/` or record active work
 in the issue tracker.
 
 Generated local artifacts such as `site/`, `bin/`, `var/`, `.cache/`,
-`web/node_modules`, Python cache directories, Python SDK build artifacts, built
+`web/node_modules`, Python cache directories, built
 `web/dist` assets, and web test artifacts are ignored workspace state. They are
 useful for local verification, screenshots, and smoke tests, but they should
 not become tracked project files. Regenerate them from the documented Makefile

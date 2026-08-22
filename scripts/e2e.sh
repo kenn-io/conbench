@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Keystone end-to-end check: boot the built conbench serve against an ephemeral
 # seeded Postgres, submit a fixture via the conbench CLI, then run the Playwright
-# browser assertions and the Python SDK smoke against the live server. Opt-in and
-# Docker-required (no graceful skip).
+# browser assertions against the live server. Opt-in and Docker-required (no
+# graceful skip).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -162,24 +162,6 @@ printf '%s' "$CI_REPORT_OUT" | jq -e \
   echo "ci report did not exercise expected comparison path: ${CI_REPORT_OUT}" >&2
   exit 1
 }
-
-echo "==> Python SDK smoke"
-(
-  cd sdk/python || exit 1
-  CONBENCH_SERVER_URL="$BASE_URL" \
-    CONBENCH_HISTORY_FINGERPRINT="$FINGERPRINT" \
-    CONBENCH_BASELINE_RESULT_ID="$RESULT_ID" \
-    CONBENCH_CONTENDER_RESULT_ID="$CONTENDER_ID" \
-    CONBENCH_CI_REPORT_REPOSITORY="https://github.com/conbench/demo" \
-    CONBENCH_CI_REPORT_COMMIT_SHA="commit-06" \
-    CONBENCH_CI_REPORT_RUN_IDS="e2e-run-06" \
-    CONBENCH_CI_REPORT_THRESHOLD_Z="0.1" \
-    CONBENCH_CI_REPORT_EXPECT_STATUS="failure" \
-    CONBENCH_CI_REPORT_EXPECT_BASELINE_RUN_ID="run-commit-05" \
-    CONBENCH_CI_REPORT_EXPECT_CONTENDER_RESULTS="2" \
-    CONBENCH_CI_REPORT_EXPECT_REGRESSIONS="2" \
-    uv run pytest -q
-)
 
 echo "==> authenticated submit + token list with a user-owned db token"
 USER_SUBMIT_OUT="$(./bin/conbench results submit web/e2e/fixtures/result.json --server "$BASE_URL" --token "$DEV_TOKEN")"

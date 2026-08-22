@@ -2,53 +2,23 @@ package db_test
 
 import (
 	"context"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/testcontainers/testcontainers-go"
-	"github.com/testcontainers/testcontainers-go/modules/postgres"
 
 	"github.com/conbench/conbench/internal/db"
 	"github.com/conbench/conbench/internal/dbtest"
 	"github.com/conbench/conbench/internal/storage"
 )
 
-// newTestStore starts an ephemeral Postgres (the pinned image), applies the
-// generated schema, and returns a Store. It skips when Docker is unavailable so
-// `go test ./...` stays green off-CI; when Docker is present the tests run
-// against real Postgres, never mocks.
+// newTestStore starts an ephemeral Postgres, applies the numbered migrations,
+// and returns a Store.
 func newTestStore(t *testing.T) (*db.Store, *pgxpool.Pool, context.Context) {
 	t.Helper()
-	if testing.Short() {
-		t.Skip("skipping Postgres-backed test in -short mode")
-	}
-	ctx := context.Background()
-
-	container, err := postgres.Run(ctx, "postgres:15.2-alpine",
-		postgres.WithDatabase("conbench"),
-		postgres.WithUsername("postgres"),
-		postgres.WithPassword("postgres"),
-		postgres.BasicWaitStrategies(),
-	)
-	if err != nil {
-		t.Skipf("skipping: cannot start Postgres container (Docker required): %v", err)
-	}
-	t.Cleanup(func() { _ = testcontainers.TerminateContainer(container) })
-
-	connStr, err := container.ConnectionString(ctx, "sslmode=disable")
-	require.NoError(t, err, "connection string")
-	pool, err := pgxpool.New(ctx, connStr)
-	require.NoError(t, err, "open pool")
-	t.Cleanup(pool.Close)
-
-	schema, err := os.ReadFile("schema.sql")
-	require.NoError(t, err, "read schema.sql")
-	_, err = pool.Exec(ctx, string(schema))
-	require.NoError(t, err, "apply schema")
+	pool, ctx := dbtest.NewPool(t)
 	return db.NewStore(pool), pool, ctx
 }
 

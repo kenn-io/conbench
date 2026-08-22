@@ -1,4 +1,4 @@
-# Conbench: Go backend + Svelte SPA + generated SDKs.
+# Conbench: Go backend + Svelte SPA + generated Go and TypeScript clients.
 #
 # The legacy Flask/Python application and old Python client packages are deleted
 # from the maintained implementation. Active developer and CI targets below use
@@ -46,7 +46,6 @@ docs-screenshots-check:
 .PHONY: clean-local
 clean-local:
 	rm -rf bin site var .cache web/node_modules web/playwright-report web/test-results
-	rm -rf sdk/python/build sdk/python/dist sdk/python/.venv sdk/python/*.egg-info
 	find . -type d \( -name "__pycache__" -o -name ".pytest_cache" -o -name ".ruff_cache" \) -prune -exec rm -rf {} +
 	@if [ -d web/dist ]; then find web/dist -mindepth 1 ! -name .gitkeep -exec rm -rf {} +; fi
 	@if command -v go >/dev/null 2>&1; then go clean -cache; fi
@@ -71,50 +70,9 @@ build-conbench-container-image:
 	# docker push ${CONTAINER_IMAGE_SPEC}
 
 
-# Regenerate internal/db/schema.sql from the Alembic migrations (the sqlc input).
-# Alembic is the temporary schema source of truth; see docs/site/operations.md
-# and docs/site/storage-roadmap.md for the schema-ownership transition.
-.PHONY: schema
-schema:
-	scripts/gen_schema.sh
-
-# Temporary schema-authoring helper. Alembic remains the schema source of truth,
-# so this target uses the schema-only Alembic image, not an app runtime path.
-SCHEMA_COMPOSE := docker compose -p conbench_schema_authoring -f docker-compose.schema.yml
-
-.PHONY: schema-new-migration
-schema-new-migration:
-	@set -e; \
-	if [ -z "$${ALEMBIC_MIGRATION_NAME:-}" ]; then \
-		echo "ALEMBIC_MIGRATION_NAME must be set to an expressive name"; \
-		exit 1; \
-	fi; \
-	cleanup() { $(SCHEMA_COMPOSE) down -v --remove-orphans >/dev/null 2>&1 || true; }; \
-	trap cleanup EXIT; \
-	$(SCHEMA_COMPOSE) down -v --remove-orphans; \
-	$(SCHEMA_COMPOSE) build schema; \
-	$(SCHEMA_COMPOSE) up -d db; \
-	CREATE_ALL_TABLES=false $(SCHEMA_COMPOSE) run --rm --no-deps -e CREATE_ALL_TABLES=false schema alembic upgrade head; \
-	CREATE_ALL_TABLES=false $(SCHEMA_COMPOSE) run --rm --no-deps -e CREATE_ALL_TABLES=false schema alembic revision -m "$${ALEMBIC_MIGRATION_NAME}"
-	@echo "A handwritten migration stub was generated in migrations/versions."
-
-# Schema-drift gate (CI + local): fail if internal/db/schema.sql is stale.
-.PHONY: schema-check
-schema-check:
-	scripts/check_schema_drift.sh
-
 .PHONY: go-deploy-manifest-check
 go-deploy-manifest-check:
 	scripts/check_go_deploy_manifests.sh
-
-.PHONY: repo-hygiene-check
-repo-hygiene-check:
-	PYTHONDONTWRITEBYTECODE=1 uv run --with tomli python -B -m unittest scripts.test_repo_hygiene
-	PYTHONDONTWRITEBYTECODE=1 uv run --with tomli python -B scripts/repo_hygiene.py .
-
-.PHONY: workflow-shape-check
-workflow-shape-check: repo-hygiene-check
-	PYTHONDONTWRITEBYTECODE=1 uv run --with tomli python -B -m unittest scripts.test_retired_python_surfaces
 
 # Bring up only the ephemeral dev Postgres for local work against the schema.
 .PHONY: dev-db
@@ -160,7 +118,7 @@ dev:
 dev-down:
 	docker compose -p conbench_backend_dev -f docker-compose.backend-dev.yml down
 
-# Regenerate the typed Go data layer from schema.sql + query/*.sql.
+# Regenerate the typed Go data layer from numbered migrations + query/*.sql.
 .PHONY: sqlc
 sqlc:
 	sqlc generate
@@ -170,11 +128,15 @@ sqlc:
 sqlc-check:
 	sqlc diff
 
+.PHONY: migration-history-check
+migration-history-check:
+	go run ./tools/migrationhistorycheck
+
 # Go backend tooling. These operate on the Go module (cmd/ + internal/).
 # `go-lint` fixes in place; `go-lint-ci` is check-only.
 .PHONY: go-fmt
 go-fmt:
-	gofmt -w cmd internal
+	gofmt -w cmd internal tools
 
 .PHONY: go-lint
 go-lint:
@@ -207,8 +169,7 @@ go-test-short:
 # document for generators without 3.1 support (oapi-codegen, for the Go client).
 # `make codegen-check` regenerates everything and fails on any diff, proving the
 # artifacts match the server and the clients match the artifacts.
-CODEGEN_PATHS := api/openapi.yaml api/openapi-3.0.yaml web/src/lib/api sdk/python/conbench sdk/go/conbench/conbench.gen.go
-OPENAPI_PYTHON_CLIENT_VERSION := 0.29.0
+CODEGEN_PATHS := api/openapi.yaml api/openapi-3.0.yaml web/src/lib/api sdk/go/conbench/conbench.gen.go
 OAPI_CODEGEN_VERSION := v2.7.0
 
 .PHONY: openapi
@@ -222,31 +183,6 @@ codegen-ts:
 	cd web && bun install --frozen-lockfile
 	cd web && bun run codegen
 
-# Python client: openapi-python-client generates conbench/ from the spec, then
-# applies small hand-written migration helpers that share the public package.
-.PHONY: codegen-py
-codegen-py:
-	RUFF_CACHE_DIR=$(CURDIR)/var/ruff-cache uvx openapi-python-client@$(OPENAPI_PYTHON_CLIENT_VERSION) generate \
-		--path api/openapi.yaml --output-path sdk/python/conbench \
-		--meta none --overwrite
-	cp -R sdk/python/overlays/conbench/. sdk/python/conbench/
-
-.PHONY: python-sdk-test
-python-sdk-test:
-	./scripts/check_python_sdk_tests.sh
-
-.PHONY: python-sdk-package-check
-python-sdk-package-check:
-	PYTHONDONTWRITEBYTECODE=1 uv run --with tomli python -B -m unittest scripts.test_python_sdk_artifact_hygiene
-	./scripts/check_python_sdk_package.sh
-
-.PHONY: python-sdk-check
-python-sdk-check: python-sdk-test python-sdk-package-check
-
-.PHONY: migration-examples-test
-migration-examples-test:
-	./scripts/check_migration_examples.sh
-
 # Go client: oapi-codegen generates sdk/go/conbench from the 3.0 downgrade (it
 # does not support 3.1). The generated client pulls in github.com/oapi-codegen/
 # runtime; run `go mod tidy` after changing the spec.
@@ -256,7 +192,7 @@ codegen-go:
 		-config sdk/go/conbench/oapi-codegen.yaml api/openapi-3.0.yaml
 
 .PHONY: codegen
-codegen: openapi codegen-ts codegen-py codegen-go
+codegen: openapi codegen-ts codegen-go
 
 # Drift gate: regenerate the spec and all clients, then fail if anything in the
 # codegen paths changed (modified or newly generated). Proves the artifact
@@ -285,8 +221,8 @@ build: web-build
 	go build -o bin/conbench ./cmd/conbench
 
 # e2e runs the keystone end-to-end check: boots the built server + ephemeral
-# seeded Postgres, submits via the CLI, and runs the Playwright + Python SDK
-# checks. Opt-in and Docker-required (no graceful skip); CI placement is 5zh0.
+# seeded Postgres, submits via the CLI, and runs the Playwright checks. Opt-in
+# and Docker-required (no graceful skip); CI placement is 5zh0.
 .PHONY: e2e
 e2e:
 	./scripts/e2e.sh

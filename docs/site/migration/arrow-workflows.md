@@ -35,7 +35,7 @@ The current evaluation work uses public forks and branches:
 | [`wesm/arrow-benchmarks-ci`](https://github.com/wesm/arrow-benchmarks-ci/tree/v2-conbench-ci-report) | `v2-conbench-ci-report` | Buildkite scheduling, smoke tests, artifact capture, result submission, and CI report handoff. |
 | [`wesm/benchmarks`](https://github.com/wesm/benchmarks/tree/v2-conbench-submit) | `v2-conbench-submit` | Python benchmark payload emission for Conbench v2. |
 | [`wesm/arrowbench`](https://github.com/wesm/arrowbench/tree/v2-conbench-payloads) | `v2-conbench-payloads` | R benchmark payload emission for Conbench v2. |
-| [`conbench/conbench`](https://github.com/conbench/conbench/tree/experimental-v2) | `experimental-v2` | Go server, Svelte dashboard, CLI, generated SDKs, and migration documentation. |
+| [`conbench/conbench`](https://github.com/conbench/conbench/tree/experimental-v2) | `experimental-v2` | Go server, Svelte dashboard, CLI, generated clients, and migration documentation. |
 
 These branches are evaluation surfaces, not permanent fork policy. Once the path
 is accepted, maintainers can decide how to upstream or replace them.
@@ -136,7 +136,7 @@ Local smoke runs have shown that:
 The read-only production-clone gate has also passed on a 100M-result-row class
 Postgres restore. Recent-runs dashboard requests returned in about 0.24-0.28 s,
 CI report selection returned in about 0.37-0.39 s, and targeted result/history/
-compare probes passed through the API, CLI, and generated Python SDK.
+compare probes passed through the API and CLI.
 
 Those checks reduce migration risk, but they do not replace Buildkite execution,
 GitHub App publishing, or a non-production deployment that maintainers can

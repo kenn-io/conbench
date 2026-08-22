@@ -18,7 +18,7 @@ The main surfaces are:
 - a dashboard for browsing runs, results, series, trends, comparisons, and CI
   reports,
 - the `conbench` CLI for submitting results and generating CI diagnostics,
-- OpenAPI and generated SDKs for read automation,
+- OpenAPI and generated Go and TypeScript clients for automation,
 - server-minted reporter tokens for CI and scripts,
 - server-side alert rules for scheduled regression monitoring.
 
@@ -41,7 +41,7 @@ The main surfaces are:
 | Generate a PR or CI diagnostic | `conbench ci report` |
 | Manage scheduled regression alerts | server-side alert rules plus `conbench admin alerts evaluate` and `conbench admin alerts deliver` |
 | Browse trends and comparisons | Svelte dashboard |
-| Read/query from automation | Generated SDKs and OpenAPI |
+| Read/query from automation | OpenAPI or the generated Go client |
 | Authenticate humans | OIDC session login |
 | Authenticate automation | Server-minted reporter tokens |
 

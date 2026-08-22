@@ -11,9 +11,7 @@ trap cleanup EXIT
 export DOCKER_REGISTRY="registry.example"
 export CONBENCH_DEPLOY_VERSION="test"
 export CONBENCH_SERVER_IMAGE_NAME="conbench-server"
-export CONBENCH_SCHEMA_IMAGE_NAME="conbench-schema"
 export CONBENCH_SERVER_IMAGE_SPEC="${DOCKER_REGISTRY}/${CONBENCH_SERVER_IMAGE_NAME}:${CONBENCH_DEPLOY_VERSION}"
-export CONBENCH_SCHEMA_IMAGE_SPEC="${DOCKER_REGISTRY}/${CONBENCH_SCHEMA_IMAGE_NAME}:${CONBENCH_DEPLOY_VERSION}"
 export CONBENCH_ADDR=":8080"
 export CONBENCH_INTENDED_BASE_URL="https://conbench.example.com"
 export CERTIFICATE_ARN="arn:aws:acm:us-east-1:000000000000:certificate/example"
@@ -56,8 +54,8 @@ fi
 if CONBENCH_SERVER_IMAGE_SPEC= render_deployment_manifest >/dev/null 2>&1; then
 	record_failure "empty CONBENCH_SERVER_IMAGE_SPEC render unexpectedly succeeded"
 fi
-if CONBENCH_SCHEMA_IMAGE_SPEC= render_migration_manifest >/dev/null 2>&1; then
-	record_failure "empty CONBENCH_SCHEMA_IMAGE_SPEC render unexpectedly succeeded"
+if CONBENCH_SERVER_IMAGE_SPEC= render_migration_manifest >/dev/null 2>&1; then
+	record_failure "empty CONBENCH_SERVER_IMAGE_SPEC render unexpectedly succeeded"
 fi
 if CERTIFICATE_ARN= render_ingress_manifest >/dev/null 2>&1; then
 	record_failure "empty CERTIFICATE_ARN render unexpectedly succeeded"
@@ -377,11 +375,12 @@ require_absent "$render_prod_ingress" "<CONBENCH_INTENDED_DNS_NAME>"
 require_absent "$render_prod_ingress" "<CERTIFICATE_ARN>"
 require_yaml_kinds "$render_prod_ingress" "Ingress"
 
-require_contains "$render_prod_migration" "image: \"${CONBENCH_SCHEMA_IMAGE_SPEC}\""
+require_contains "$render_prod_migration" "image: \"${CONBENCH_SERVER_IMAGE_SPEC}\""
+require_contains "$render_prod_migration" 'command: ["/usr/local/bin/conbench", "migrate"]'
 require_absent "$render_prod_migration" "CONBENCH_SERVER_IMAGE_SPEC"
 require_absent "$render_prod_migration" "CONBENCH_WEBAPP_IMAGE_SPEC"
 require_absent "$render_prod_migration" "{{"
-require_yaml_kinds "$render_prod_migration" "ConfigMap" "Job"
+require_yaml_kinds "$render_prod_migration" "Job"
 
 require_config_value "$render_config" "CONBENCH_ADDR" ":8080"
 require_config_value "$render_config" "CONBENCH_INTENDED_BASE_URL" "https://conbench.example.com"
