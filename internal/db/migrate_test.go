@@ -155,3 +155,59 @@ func TestMigrateUpgradesPreIdempotencySchema(t *testing.T) {
 	assert.True(t, constraintValid)
 	assert.True(t, indexValid)
 }
+
+func TestMigrateRebuildsInterruptedSubmissionIndex(t *testing.T) {
+	pool, ctx := dbtest.NewEmptyPool(t)
+	_, err := pool.Exec(ctx, db.SchemaSQL)
+	require.NoError(t, err)
+	_, err = pool.Exec(ctx, `
+		DROP INDEX public.benchmark_result_submission_key_index;
+		INSERT INTO public."case" (id, name, tags) VALUES ('case-1', 'bench', '{}');
+		INSERT INTO public.context (id, tags) VALUES ('context-1', '{}');
+		INSERT INTO public.info (id, tags) VALUES ('info-1', '{}');
+		INSERT INTO public.hardware (id, name, type, hash) VALUES ('hardware-1', 'host', 'machine', 'hash-1');
+		INSERT INTO public.benchmark_result (
+			id, case_id, context_id, info_id, hardware_id, run_id, run_tags,
+			"timestamp", commit_repo_url, history_fingerprint,
+			submission_key, submission_payload_sha256
+		) VALUES
+			('result-1', 'case-1', 'context-1', 'info-1', 'hardware-1', 'run-1', '{}', now(), 'repo', 'fp', 'duplicate', repeat('a', 64)),
+			('result-2', 'case-1', 'context-1', 'info-1', 'hardware-1', 'run-2', '{}', now(), 'repo', 'fp', 'duplicate', repeat('b', 64))
+	`)
+	require.NoError(t, err)
+
+	_, err = pool.Exec(ctx, `
+		CREATE UNIQUE INDEX CONCURRENTLY benchmark_result_submission_key_index
+		ON public.benchmark_result (submission_key)
+		WHERE submission_key IS NOT NULL
+	`)
+	require.Error(t, err)
+	var valid bool
+	require.NoError(t, pool.QueryRow(ctx, `
+		SELECT indisvalid
+		FROM pg_index
+		WHERE indexrelid = 'public.benchmark_result_submission_key_index'::regclass
+	`).Scan(&valid))
+	assert.False(t, valid)
+
+	_, err = pool.Exec(ctx, `
+		UPDATE public.benchmark_result
+		SET submission_key = NULL, submission_payload_sha256 = NULL
+		WHERE id = 'result-2'
+	`)
+	require.NoError(t, err)
+
+	require.NoError(t, db.Migrate(ctx, pool))
+	require.NoError(t, pool.QueryRow(ctx, `
+		SELECT indisvalid
+		FROM pg_index
+		WHERE indexrelid = 'public.benchmark_result_submission_key_index'::regclass
+	`).Scan(&valid))
+	assert.True(t, valid)
+	_, err = pool.Exec(ctx, `
+		UPDATE public.benchmark_result
+		SET submission_key = 'duplicate', submission_payload_sha256 = repeat('c', 64)
+		WHERE id = 'result-2'
+	`)
+	require.Error(t, err)
+}

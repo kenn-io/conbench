@@ -170,33 +170,25 @@ func addSubmissionIdempotency(ctx context.Context, conn *pgx.Conn) error {
 		return err
 	}
 	if _, err := conn.Exec(ctx, `
-		DO $$
-		BEGIN
-			IF NOT EXISTS (
-				SELECT 1 FROM pg_constraint
-				WHERE conrelid = 'public.benchmark_result'::regclass
-				  AND conname = 'benchmark_result_submission_idempotency_check'
-			) THEN
-				ALTER TABLE public.benchmark_result
-					ADD CONSTRAINT benchmark_result_submission_idempotency_check
-					CHECK (
-						(submission_key IS NULL AND submission_payload_sha256 IS NULL)
-						OR (submission_key IS NOT NULL AND submission_payload_sha256 ~ '^[0-9a-f]{64}$')
-					) NOT VALID;
-			END IF;
-		END
-		$$
+		ALTER TABLE public.benchmark_result
+			DROP CONSTRAINT IF EXISTS benchmark_result_submission_idempotency_check;
+		ALTER TABLE public.benchmark_result
+			ADD CONSTRAINT benchmark_result_submission_idempotency_check
+			CHECK (
+				(submission_key IS NULL AND submission_payload_sha256 IS NULL)
+				OR (
+					submission_key IS NOT NULL
+					AND submission_payload_sha256 IS NOT NULL
+					AND submission_payload_sha256 ~ '^[0-9a-f]{64}$'
+				)
+			) NOT VALID
 	`); err != nil {
 		return err
 	}
 	// This migration intentionally runs outside a transaction so PostgreSQL can
 	// build the unique index without blocking writes for the duration of the
 	// table scan.
-	if _, err := conn.Exec(ctx, `
-		CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS benchmark_result_submission_key_index
-		ON public.benchmark_result (submission_key)
-		WHERE submission_key IS NOT NULL
-	`); err != nil {
+	if err := ensureSubmissionKeyIndex(ctx, conn); err != nil {
 		return err
 	}
 	if _, err := conn.Exec(ctx, `
@@ -205,16 +197,65 @@ func addSubmissionIdempotency(ctx context.Context, conn *pgx.Conn) error {
 	`); err != nil {
 		return err
 	}
-	var indexValid bool
-	if err := conn.QueryRow(ctx, `
-		SELECT indisvalid
-		FROM pg_index
-		WHERE indexrelid = 'public.benchmark_result_submission_key_index'::regclass
-	`).Scan(&indexValid); err != nil {
+	return nil
+}
+
+func ensureSubmissionKeyIndex(ctx context.Context, conn *pgx.Conn) error {
+	exists, valid, matches, err := submissionKeyIndexState(ctx, conn)
+	if err != nil {
 		return err
 	}
-	if !indexValid {
-		return errors.New("benchmark_result_submission_key_index exists but is invalid")
+	if exists && (!valid || !matches) {
+		if _, err := conn.Exec(ctx, `DROP INDEX CONCURRENTLY public.benchmark_result_submission_key_index`); err != nil {
+			return err
+		}
+		exists = false
+	}
+	if !exists {
+		if _, err := conn.Exec(ctx, `
+			CREATE UNIQUE INDEX CONCURRENTLY benchmark_result_submission_key_index
+			ON public.benchmark_result (submission_key)
+			WHERE submission_key IS NOT NULL
+		`); err != nil {
+			return err
+		}
+	}
+	exists, valid, matches, err = submissionKeyIndexState(ctx, conn)
+	if err != nil {
+		return err
+	}
+	if !exists || !valid || !matches {
+		return errors.New("benchmark_result_submission_key_index was not created with the required definition")
 	}
 	return nil
+}
+
+func submissionKeyIndexState(ctx context.Context, conn *pgx.Conn) (exists, valid, matches bool, err error) {
+	if err := conn.QueryRow(ctx, `
+		SELECT to_regclass('public.benchmark_result_submission_key_index') IS NOT NULL
+	`).Scan(&exists); err != nil {
+		return false, false, false, err
+	}
+	if !exists {
+		return false, false, false, nil
+	}
+	if err := conn.QueryRow(ctx, `
+		SELECT
+			i.indisvalid,
+			i.indisunique
+				AND i.indnkeyatts = 1
+				AND i.indnatts = 1
+				AND am.amname = 'btree'
+				AND COALESCE(a.attname = 'submission_key', false)
+				AND COALESCE(pg_get_expr(i.indpred, i.indrelid) = '(submission_key IS NOT NULL)', false)
+		FROM pg_index AS i
+		JOIN pg_class AS idx ON idx.oid = i.indexrelid
+		JOIN pg_am AS am ON am.oid = idx.relam
+		LEFT JOIN pg_attribute AS a
+			ON a.attrelid = i.indrelid AND a.attnum = i.indkey[0]
+		WHERE i.indexrelid = 'public.benchmark_result_submission_key_index'::regclass
+	`).Scan(&valid, &matches); err != nil {
+		return false, false, false, err
+	}
+	return true, valid, matches, nil
 }

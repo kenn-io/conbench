@@ -97,7 +97,7 @@ CREATE TABLE public.benchmark_result (
     history_fingerprint text NOT NULL,
     submission_key text,
     submission_payload_sha256 text,
-    CONSTRAINT benchmark_result_submission_idempotency_check CHECK ((((submission_key IS NULL) AND (submission_payload_sha256 IS NULL)) OR ((submission_key IS NOT NULL) AND (submission_payload_sha256 ~ '^[0-9a-f]{64}$'::text))))
+    CONSTRAINT benchmark_result_submission_idempotency_check CHECK ((((submission_key IS NULL) AND (submission_payload_sha256 IS NULL)) OR ((submission_key IS NOT NULL) AND (submission_payload_sha256 IS NOT NULL) AND (submission_payload_sha256 ~ '^[0-9a-f]{64}$'::text))))
 );
 
 CREATE TABLE public."case" (

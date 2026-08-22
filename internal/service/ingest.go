@@ -182,12 +182,43 @@ func canonicalSubmissionPayloadSHA256(req SubmitRequest) (string, error) {
 		return "", fmt.Errorf("normalize submission payload: %w", err)
 	}
 	delete(canonicalObject, "submission_key")
+	preserveEmptyCollectionPresence(req, canonicalObject)
 	payload, err = json.Marshal(canonicalObject)
 	if err != nil {
 		return "", fmt.Errorf("canonicalize submission payload: %w", err)
 	}
 	digest := sha256.Sum256(payload)
 	return hex.EncodeToString(digest[:]), nil
+}
+
+// preserveEmptyCollectionPresence restores empty maps and slices omitted by
+// encoding/json struct tags. Nil and empty collections can persist as different
+// SQL values, so they must not share an idempotency hash.
+func preserveEmptyCollectionPresence(req SubmitRequest, payload map[string]any) {
+	if req.Info != nil {
+		payload["info"] = req.Info
+	}
+	if req.RunTags != nil {
+		payload["run_tags"] = req.RunTags
+	}
+	if req.OptionalBenchmarkInfo != nil {
+		payload["optional_benchmark_info"] = req.OptionalBenchmarkInfo
+	}
+	if req.Validation != nil {
+		payload["validation"] = req.Validation
+	}
+	if req.ChangeAnnotations != nil {
+		payload["change_annotations"] = req.ChangeAnnotations
+	}
+	if req.Stats != nil && req.Stats.Times != nil {
+		payload["stats"].(map[string]any)["times"] = req.Stats.Times
+	}
+	if req.MachineInfo != nil && req.MachineInfo.GpuProductNames != nil {
+		payload["machine_info"].(map[string]any)["gpu_product_names"] = req.MachineInfo.GpuProductNames
+	}
+	if req.ClusterInfo != nil && req.ClusterInfo.OptionalInfo != nil {
+		payload["cluster_info"].(map[string]any)["optional_info"] = req.ClusterInfo.OptionalInfo
+	}
 }
 
 func replaySubmission(existing storage.SubmissionResult, canonicalHash string) (*Result, error) {

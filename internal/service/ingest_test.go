@@ -48,6 +48,35 @@ func TestSubmitIdempotentReplayAndConflict(t *testing.T) {
 	assert.ErrorIs(t, err, service.ErrSubmissionConflict)
 }
 
+func TestSubmitIdempotencyDistinguishesEmptyOptionalCollection(t *testing.T) {
+	ing, _, _, ctx := newIngester(t)
+	req := machineReq(samples(1, 2, 3), "s")
+	req.SubmissionKey = "publisher-0000000000000002"
+
+	_, err := ing.Submit(ctx, req)
+	require.NoError(t, err)
+
+	changed := req
+	statsWithEmptyTimes := *req.Stats
+	statsWithEmptyTimes.Times = []*float64{}
+	changed.Stats = &statsWithEmptyTimes
+	_, err = ing.Submit(ctx, changed)
+	require.ErrorIs(t, err, service.ErrSubmissionConflict)
+}
+
+func TestSubmissionConstraintRequiresHashForKey(t *testing.T) {
+	ing, _, pool, ctx := newIngester(t)
+	result, err := ing.Submit(ctx, machineReq(samples(1, 2, 3), "s"))
+	require.NoError(t, err)
+
+	_, err = pool.Exec(ctx, `
+		UPDATE benchmark_result
+		SET submission_key = 'key-without-hash', submission_payload_sha256 = NULL
+		WHERE id = $1
+	`, result.ID)
+	require.Error(t, err)
+}
+
 func TestSubmitWithoutIdempotencyKeyCreatesIndependentResults(t *testing.T) {
 	ing, _, _, ctx := newIngester(t)
 	req := machineReq(samples(1, 2, 3), "s")
