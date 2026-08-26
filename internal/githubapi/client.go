@@ -256,6 +256,10 @@ func encodeAppJWT(appID string, privateKey string, now time.Time) (string, error
 	if err != nil {
 		return "", err
 	}
+	return encodeAppJWTWithKey(appID, key, now)
+}
+
+func encodeAppJWTWithKey(appID string, key *rsa.PrivateKey, now time.Time) (string, error) {
 	header := map[string]string{"alg": "RS256", "typ": "JWT"}
 	claims := map[string]any{
 		"iss": strings.TrimSpace(appID),

@@ -5,6 +5,8 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -236,6 +238,26 @@ func TestRunTracksAuthOrQuotaFailuresBeyondFailureSamples(t *testing.T) {
 	assert.Equal(t, 11, summary.Failed)
 	assert.Equal(t, 11, summary.AuthOrQuotaFailures)
 	require.Len(t, summary.Failures, 10)
+}
+
+func TestRunClassifiesRealGitHubClientUnauthorizedFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"message":"Bad credentials"}`))
+	}))
+	t.Cleanup(server.Close)
+	store := &fakeStore{candidates: []storage.UnknownCommitCandidate{
+		candidate("id-1", "https://github.com/org/repo", "abc123"),
+	}}
+	client := commit.NewGitHubClient("abcde", server.URL)
+	provider := commit.NewGitHubProvider(client, time.Second, nil)
+	repairer := NewRepairer(store, provider, nil)
+
+	summary, err := repairer.Run(context.Background(), Options{Limit: 1})
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, summary.Failed)
+	assert.Equal(t, 1, summary.AuthOrQuotaFailures)
 }
 
 func TestRunMissingForkPointFailsWithoutUpdating(t *testing.T) {

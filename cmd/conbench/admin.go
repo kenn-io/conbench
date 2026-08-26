@@ -18,6 +18,7 @@ import (
 
 	"github.com/conbench/conbench/internal/auth"
 	"github.com/conbench/conbench/internal/commit"
+	"github.com/conbench/conbench/internal/commitauth"
 	"github.com/conbench/conbench/internal/commitrepair"
 	"github.com/conbench/conbench/internal/db"
 	"github.com/conbench/conbench/internal/service"
@@ -35,7 +36,7 @@ const (
 
 type adminRepairConfig struct {
 	DatabaseURL     string
-	GitHubToken     string
+	GitHubClient    *commit.GitHubClient
 	Repository      *string
 	Limit           int
 	Cursor          *commitrepair.Cursor
@@ -100,8 +101,8 @@ var runAdminTokenCreate = runAdminTokenCreateReal
 
 var newAdminGitHubClient = newAdminGitHubClientReal
 
-func newAdminGitHubClientReal(tokenEnv string) *commit.GitHubClient {
-	return commit.NewGitHubClient(tokenEnv, "")
+func newAdminGitHubClientReal() (*commit.GitHubClient, error) {
+	return commitauth.LoadRequired()
 }
 
 func adminAlertsEvaluateCommand(stdout, stderr io.Writer) *cobra.Command {
@@ -749,13 +750,11 @@ func newAdminRepairCommand(
 			if cfg.DatabaseURL == "" {
 				return errors.New("CONBENCH_DB_URL is required")
 			}
-			cfg.GitHubToken = os.Getenv("GITHUB_API_TOKEN")
-			if cfg.GitHubToken == "" {
-				return errors.New("GITHUB_API_TOKEN is required")
+			githubClient, err := newAdminGitHubClient()
+			if err != nil {
+				return err
 			}
-			if !commit.HasUsableGitHubToken(cfg.GitHubToken) {
-				return errors.New("GITHUB_API_TOKEN has no usable token")
-			}
+			cfg.GitHubClient = githubClient
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -799,7 +798,7 @@ func runAdminRepairReal(ctx context.Context, cfg adminRepairConfig, _ io.Writer,
 	}
 
 	store := db.NewStore(pool)
-	client := newAdminGitHubClient(cfg.GitHubToken)
+	client := cfg.GitHubClient
 	provider := commit.NewGitHubProvider(client, cfg.GitHubTimeout, nil)
 
 	var backfiller *commit.Backfiller
