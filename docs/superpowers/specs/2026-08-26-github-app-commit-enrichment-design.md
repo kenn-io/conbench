@@ -32,49 +32,69 @@ enrichment path.
 
 ## Configuration
 
-Commit enrichment supports exactly one of these authentication modes:
+Remote GitHub commit enrichment supports exactly one of these authentication
+modes when it is enabled:
 
 1. `GITHUB_API_TOKEN`, the existing comma-separated static token pool.
 2. A GitHub App configured with all of:
-   - `CONBENCH_GITHUB_APP_ID`
-   - `CONBENCH_GITHUB_APP_INSTALLATION_ID`
-   - `CONBENCH_GITHUB_APP_PRIVATE_KEY_FILE`
+   - `CONBENCH_COMMIT_GITHUB_APP_ID`
+   - `CONBENCH_COMMIT_GITHUB_APP_INSTALLATION_ID`
+   - `CONBENCH_COMMIT_GITHUB_APP_PRIVATE_KEY_FILE`
+
+The commit-specific namespace is intentionally separate from the existing
+`CONBENCH_GITHUB_APP_ID`, `CONBENCH_GITHUB_APP_PRIVATE_KEY`,
+`CONBENCH_CI_GITHUB_APP_ID`, and `CONBENCH_CI_GITHUB_APP_PRIVATE_KEY` settings
+recognized by CI report publishing. CI credentials neither enable nor
+partially configure commit enrichment. The CI private-key settings continue to
+hold PEM contents; only the commit-specific `_PRIVATE_KEY_FILE` setting is a
+file path.
 
 The private-key setting names a readable PEM file. Production deployments can
 provide that file through their service manager's credential mechanism;
 Conbench does not require the PEM contents in an environment variable.
 
-Startup and `admin repair-commits` reject partial App configuration and reject
-configuration that supplies both authentication modes. They validate the IDs,
-read the bounded key file, and parse its RSA private key before serving or
-repairing. Startup validation does not contact GitHub, so a transient GitHub
-outage does not prevent Conbench from starting.
+The server preserves its current zero-mode behavior: when neither
+`GITHUB_API_TOKEN` nor any commit-specific App setting is present, it uses the
+local commit provider. `admin repair-commits` still requires one complete
+authentication mode because repair cannot synthesize commit metadata.
 
-The App itself needs read-only Metadata and Contents permissions. It needs no
-webhook and no write permission. Installation scope is a deployment decision;
-the recommended scope is only the repositories whose commits Conbench must
-enrich.
+Startup and `admin repair-commits` reject partial commit-specific App
+configuration and reject configuration that supplies both commit
+authentication modes. They validate the IDs, read the bounded key file, and
+parse its RSA private key before serving or repairing. Startup validation does
+not contact GitHub, so a transient GitHub outage does not prevent Conbench from
+starting.
+
+The App itself needs read-only Metadata, Contents, and Pull requests
+permissions. Pull requests access is required because enrichment resolves a
+branch through `GET /repos/{owner}/{repo}/pulls/{number}` when a result supplies
+a pull request number. The App needs no webhook and no write permission.
+Installation scope is a deployment decision; the recommended scope is only the
+repositories whose commits Conbench must enrich.
 
 ## Token source
 
 The GitHub API package owns a reusable App token source. It:
 
 1. Signs a short-lived App JSON Web Token with the configured private key.
-2. Exchanges it at the explicitly configured installation endpoint.
-3. Records the installation token and GitHub's `expires_at` value.
+2. Exchanges it at the explicitly configured installation endpoint through a
+   new response path that decodes both `token` and `expires_at`.
+3. Records the installation token and expiry returned by GitHub.
 4. Returns the cached token until five minutes before expiry.
 5. Serializes refresh so concurrent requests share one exchange.
 
-The source exposes token acquisition and invalidation, not HTTP request
-semantics. This keeps commit enrichment responsible for its existing request,
-quota, and response behavior while allowing CI-reporting code to adopt the
-same renewable source separately if needed.
+The source exposes App token acquisition and invalidation, not HTTP request or
+static-pool semantics. It reuses the existing JWT signer and PEM parser, but it
+does not call the existing one-shot `installationToken` helper because that
+helper discovers the first installation and discards `expires_at`.
 
 The commit client asks its credential source for a token for each request. The
 App source normally answers from memory. If GitHub returns HTTP 401, the client
 invalidates the App token and retries that request once with a newly minted
 token. Other responses keep the current commit client's behavior. Static token
-pools retain their existing rotation and quota handling.
+pools remain owned by the commit client; its existing HTTP 403 quota handler
+continues rotating them without adding rotation to the App token-source
+interface.
 
 ## Ingestion and repair
 
@@ -95,8 +115,9 @@ resubmitting benchmarks.
 
 ## Deployment flow
 
-1. Register a dedicated App with read-only Metadata and Contents permissions,
-   no webhook, and repository-selected installation scope.
+1. Register a dedicated App with read-only Metadata, Contents, and Pull
+   requests permissions, no webhook, and repository-selected installation
+   scope.
 2. Install its private key through the deployment's credential mechanism and
    set the App and installation IDs.
 3. Start Conbench and exercise one authenticated commit lookup through the
@@ -119,6 +140,9 @@ Focused Go tests use local HTTP servers to verify:
 - An expiring token is refreshed once under concurrent demand.
 - HTTP 401 invalidates the token and retries the commit request once.
 - Partial, conflicting, unreadable, or malformed App configuration is rejected.
+- No commit authentication settings preserve the server's local provider,
+  while repair rejects the same zero-mode configuration.
+- CI-reporting App settings do not configure commit enrichment.
 - Static token-pool behavior remains unchanged.
 - Live ingestion and commit repair construct the same App-backed commit client.
 
