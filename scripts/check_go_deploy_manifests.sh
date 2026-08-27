@@ -267,6 +267,24 @@ require_key_sets_equal() {
 	fi
 }
 
+require_log_order() {
+	local file="$1"
+	local first="$2"
+	local second="$3"
+	if ! python3 - "$file" "$first" "$second" <<'PY'
+import sys
+
+lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+first = next((i for i, line in enumerate(lines) if sys.argv[2] in line), None)
+second = next((i for i, line in enumerate(lines) if sys.argv[3] in line), None)
+if first is None or second is None or first >= second:
+    raise SystemExit(1)
+PY
+	then
+		record_failure "unexpected command order in $file: $first before $second"
+	fi
+}
+
 require_service_apply_before_ingress_branch() {
 	local file="$1"
 	if ! python3 - "$file" <<'PY'
@@ -408,6 +426,37 @@ exercise_deploy_secrets_case() {
 	)
 }
 
+exercise_runtime_deploy_case() {
+	local outfile="$1"
+	(
+		export EKS_CLUSTER='cluster.example'
+		export NAMESPACE='default'
+		aws() {
+			printf 'aws %s\n' "$*" >> "$outfile"
+		}
+		render_deployment_manifest() {
+			printf '%s\n' 'apiVersion: apps/v1' 'kind: Deployment' 'metadata:' '  name: conbench-deployment'
+		}
+		apply_service_monitor_if_supported() {
+			printf '%s\n' 'service monitor handled' >> "$outfile"
+		}
+		kubectl() {
+			if [[ "$*" == 'apply -f -' ]]; then
+				local payload
+				payload=$(command cat)
+				if grep -Fq 'kind: Deployment' <<< "$payload"; then
+					printf '%s\n' 'kubectl apply deployment/conbench-deployment' >> "$outfile"
+				else
+					printf '%s\n' 'kubectl apply stdin' >> "$outfile"
+				fi
+				return
+			fi
+			printf 'kubectl %s\n' "$*" >> "$outfile"
+		}
+		deploy
+	) >/dev/null 2>&1
+}
+
 require_missing "$root/cmd/conbench-server"
 
 require_absent "$render_prod_deployment" "gunicorn"
@@ -482,7 +531,7 @@ require_missing "$root/k8s/kube-prometheus"
 static_deploy_log="$tmp/static-deploy.log"
 if exercise_deploy_secrets_case "$static_deploy_log" static; then
 	require_contains "$static_deploy_log" "kubectl delete secret conbench-github-app-key --ignore-not-found=true"
-	require_contains "$static_deploy_log" "kubectl rollout restart deployment/conbench-deployment"
+	require_absent "$static_deploy_log" "kubectl rollout restart deployment/conbench-deployment"
 else
 	record_failure "static secret deployment exercise failed"
 fi
@@ -490,9 +539,19 @@ fi
 github_app_deploy_log="$tmp/github-app-deploy.log"
 if exercise_deploy_secrets_case "$github_app_deploy_log" github_app; then
 	require_absent "$github_app_deploy_log" "kubectl delete secret conbench-github-app-key"
-	require_contains "$github_app_deploy_log" "kubectl rollout restart deployment/conbench-deployment"
+	require_absent "$github_app_deploy_log" "kubectl rollout restart deployment/conbench-deployment"
 else
 	record_failure "GitHub App secret deployment exercise failed"
+fi
+
+runtime_deploy_log="$tmp/runtime-deploy.log"
+if exercise_runtime_deploy_case "$runtime_deploy_log"; then
+	require_contains "$runtime_deploy_log" "kubectl rollout restart deployment/conbench-deployment"
+	require_log_order "$runtime_deploy_log" \
+		"kubectl apply deployment/conbench-deployment" \
+		"kubectl rollout restart deployment/conbench-deployment"
+else
+	record_failure "runtime deployment exercise failed"
 fi
 
 secret_no_oidc="$tmp/secret-no-oidc.json"

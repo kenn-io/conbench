@@ -404,9 +404,6 @@ deploy_secrets_and_config() {
     kubectl delete secret conbench-github-app-key --ignore-not-found=true || return 1
   fi
   render_config_manifest | kubectl apply -f - || return 1
-  if kubectl get deployment conbench-deployment >/dev/null 2>&1; then
-    kubectl rollout restart deployment/conbench-deployment || return 1
-  fi
 }
 
 run_migrations() {
@@ -451,6 +448,7 @@ deploy() {
 
   # (Re-)apply deployment using the image tagged by CONBENCH_DEPLOY_VERSION.
   render_deployment_manifest | kubectl apply -f - || return 1
+  kubectl rollout restart deployment/conbench-deployment || return 1
   kubectl apply -f k8s/conbench-service.yml || return 1
   apply_service_monitor_if_supported || return 1
 
