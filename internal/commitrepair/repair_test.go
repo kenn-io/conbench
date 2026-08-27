@@ -2,9 +2,15 @@ package commitrepair
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
 	"encoding/base64"
+	"encoding/pem"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -12,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/conbench/conbench/internal/commit"
+	"github.com/conbench/conbench/internal/githubapi"
 	"github.com/conbench/conbench/internal/storage"
 )
 
@@ -236,6 +243,53 @@ func TestRunTracksAuthOrQuotaFailuresBeyondFailureSamples(t *testing.T) {
 	assert.Equal(t, 11, summary.Failed)
 	assert.Equal(t, 11, summary.AuthOrQuotaFailures)
 	require.Len(t, summary.Failures, 10)
+}
+
+func TestRunClassifiesRealGitHubClientUnauthorizedFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"message":"Bad credentials"}`))
+	}))
+	t.Cleanup(server.Close)
+	store := &fakeStore{candidates: []storage.UnknownCommitCandidate{
+		candidate("id-1", "https://github.com/org/repo", "abc123"),
+	}}
+	client := commit.NewGitHubClient("abcde", server.URL)
+	provider := commit.NewGitHubProvider(client, time.Second, nil)
+	repairer := NewRepairer(store, provider, nil)
+
+	summary, err := repairer.Run(context.Background(), Options{Limit: 1})
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, summary.Failed)
+	assert.Equal(t, 1, summary.AuthOrQuotaFailures)
+}
+
+func TestRunClassifiesGitHubAppTokenExchangeUnauthorizedFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"message":"Integration not found"}`))
+	}))
+	t.Cleanup(server.Close)
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+	source, err := githubapi.NewAppTokenSource(githubapi.AppTokenSourceConfig{
+		AppID: "12345", InstallationID: 42, AppPrivateKey: string(keyPEM), BaseURL: server.URL, HTTPClient: server.Client(),
+	})
+	require.NoError(t, err)
+	store := &fakeStore{candidates: []storage.UnknownCommitCandidate{
+		candidate("id-1", "https://github.com/org/repo", "abc123"),
+	}}
+	client := commit.NewGitHubClientWithTokenSource(source, server.URL)
+	provider := commit.NewGitHubProvider(client, time.Second, nil)
+	repairer := NewRepairer(store, provider, nil)
+
+	summary, err := repairer.Run(context.Background(), Options{Limit: 1})
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, summary.Failed)
+	assert.Equal(t, 1, summary.AuthOrQuotaFailures)
 }
 
 func TestRunMissingForkPointFailsWithoutUpdating(t *testing.T) {

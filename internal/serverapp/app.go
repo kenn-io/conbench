@@ -13,10 +13,13 @@
 //	CONBENCH_API_TOKEN     Static operator bearer token accepted on writes.
 //	                       User-attributed api_token rows also authenticate writes.
 //	CONBENCH_AUTH_DISABLED "true" disables write auth (dev only).
-//	GITHUB_API_TOKEN          GitHub API token(s), comma-separated. When set, commit
-//	                          metadata is fetched from the GitHub API and default-branch
-//	                          ancestry is backfilled asynchronously; when unset, commits
-//	                          are synthesized locally (dev/e2e).
+//	GITHUB_API_TOKEN          GitHub API token(s), comma-separated. Enables remote
+//	                          commit metadata enrichment.
+//	CONBENCH_COMMIT_GITHUB_APP_ID GitHub App ID for renewable commit enrichment.
+//	CONBENCH_COMMIT_GITHUB_APP_INSTALLATION_ID GitHub App installation ID.
+//	CONBENCH_COMMIT_GITHUB_APP_PRIVATE_KEY_FILE Path to the App private-key PEM file.
+//	                          Configure either the static token pool or all three App
+//	                          settings. With neither, commits are synthesized locally.
 //	CONBENCH_GITHUB_TIMEOUT   In-request GitHub enrichment budget (Go duration). Default 5s.
 //	CONBENCH_OIDC_ISSUER_URL  OIDC issuer URL. When any OIDC var is set, all three
 //	                          plus CONBENCH_INTENDED_BASE_URL and
@@ -48,6 +51,7 @@ import (
 	"github.com/conbench/conbench/internal/api"
 	"github.com/conbench/conbench/internal/auth"
 	"github.com/conbench/conbench/internal/commit"
+	"github.com/conbench/conbench/internal/commitauth"
 	"github.com/conbench/conbench/internal/db"
 	"github.com/conbench/conbench/internal/oidcauth"
 	"github.com/conbench/conbench/internal/seed"
@@ -126,10 +130,9 @@ func Run(ctx context.Context) error {
 
 	var provider commit.Provider = commit.LocalProvider{}
 	var backfiller *commit.Backfiller
-	if cfg.githubToken != "" {
-		client := commit.NewGitHubClient(cfg.githubToken, "")
-		backfiller = commit.NewBackfiller(client, store)
-		provider = commit.NewGitHubProvider(client, cfg.githubTimeout, backfiller)
+	if cfg.githubClient != nil {
+		backfiller = commit.NewBackfiller(cfg.githubClient, store)
+		provider = commit.NewGitHubProvider(cfg.githubClient, cfg.githubTimeout, backfiller)
 		log.Printf("github commit provider enabled (budget %s)", cfg.githubTimeout)
 	}
 
@@ -170,7 +173,7 @@ type config struct {
 	initSchema       bool
 	apiToken         string
 	authDisabled     bool
-	githubToken      string
+	githubClient     *commit.GitHubClient
 	githubTimeout    time.Duration
 	oidcIssuerURL    string
 	oidcClientID     string
@@ -200,6 +203,10 @@ func loadConfig() (config, error) {
 		}
 		githubTimeout = d
 	}
+	githubClient, err := commitauth.Load()
+	if err != nil {
+		return config{}, fmt.Errorf("configure github commit enrichment: %w", err)
+	}
 
 	oidcIssuerURL := os.Getenv("CONBENCH_OIDC_ISSUER_URL")
 	oidcClientID := os.Getenv("CONBENCH_OIDC_CLIENT_ID")
@@ -220,7 +227,7 @@ func loadConfig() (config, error) {
 		initSchema:       os.Getenv("CONBENCH_INIT_SCHEMA") == "true",
 		apiToken:         os.Getenv("CONBENCH_API_TOKEN"),
 		authDisabled:     os.Getenv("CONBENCH_AUTH_DISABLED") == "true",
-		githubToken:      os.Getenv("GITHUB_API_TOKEN"),
+		githubClient:     githubClient,
 		githubTimeout:    githubTimeout,
 		oidcIssuerURL:    oidcIssuerURL,
 		oidcClientID:     oidcClientID,

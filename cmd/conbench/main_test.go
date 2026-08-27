@@ -3,7 +3,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -481,7 +485,7 @@ func TestAdminRepairUsageAndConfigErrors(t *testing.T) {
 			args:         []string{"admin", "repair-commits"},
 			dbURL:        "postgres://db",
 			wantCode:     1,
-			wantStderr:   "GITHUB_API_TOKEN",
+			wantStderr:   "GitHub commit authentication is required",
 			wantNoStdout: true,
 		},
 		{
@@ -498,6 +502,9 @@ func TestAdminRepairUsageAndConfigErrors(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("CONBENCH_DB_URL", tt.dbURL)
 			t.Setenv("GITHUB_API_TOKEN", tt.token)
+			t.Setenv("CONBENCH_COMMIT_GITHUB_APP_ID", "")
+			t.Setenv("CONBENCH_COMMIT_GITHUB_APP_INSTALLATION_ID", "")
+			t.Setenv("CONBENCH_COMMIT_GITHUB_APP_PRIVATE_KEY_FILE", "")
 
 			var stdout, stderr bytes.Buffer
 			code := run(tt.args, &stdout, &stderr)
@@ -556,9 +563,39 @@ func TestAdminRepairRunnerConfig(t *testing.T) {
 	assert.Equal(t, time.Millisecond, got.BackfillTimeout)
 	assert.Equal(t, 20*time.Second, got.GitHubTimeout)
 	assert.Equal(t, "text", got.Format)
+	assert.NotNil(t, got.GitHubClient)
 	assert.Empty(t, stderr.String())
 	assert.NotContains(t, stdout.String(), "user:pass")
 	assert.NotContains(t, stdout.String(), "abcde")
+}
+
+func TestAdminRepairAcceptsCommitAppAuthentication(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	keyFile := filepath.Join(t.TempDir(), "app.pem")
+	require.NoError(t, os.WriteFile(keyFile, pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(key),
+	}), 0o600))
+
+	var got adminRepairConfig
+	runAdminRepair = func(_ context.Context, cfg adminRepairConfig, _ io.Writer, _ io.Writer) (commitrepair.Summary, error) {
+		got = cfg
+		return commitrepair.Summary{Scanned: 1}, nil
+	}
+	t.Cleanup(func() { runAdminRepair = runAdminRepairReal })
+	t.Setenv("CONBENCH_DB_URL", "postgres://db/conbench")
+	t.Setenv("GITHUB_API_TOKEN", "")
+	t.Setenv("CONBENCH_COMMIT_GITHUB_APP_ID", "12345")
+	t.Setenv("CONBENCH_COMMIT_GITHUB_APP_INSTALLATION_ID", "42")
+	t.Setenv("CONBENCH_COMMIT_GITHUB_APP_PRIVATE_KEY_FILE", keyFile)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"admin", "repair-commits", "--dry-run"}, &stdout, &stderr)
+
+	require.Equal(t, 0, code, "stderr=%s", stderr.String())
+	assert.NotNil(t, got.GitHubClient)
+	assert.Empty(t, stderr.String())
 }
 
 func TestAdminAlertsEvaluateUsageAndConfigErrors(t *testing.T) {
@@ -1523,8 +1560,8 @@ func TestAdminRepairRealPostgresDryRunAndRepair(t *testing.T) {
 
 	srv := githubtest.NewServer(t)
 	fakeAdminRepairRepo(t, srv)
-	newAdminGitHubClient = func(tokenEnv string) *commit.GitHubClient {
-		return commit.NewGitHubClient(tokenEnv, srv.URL)
+	newAdminGitHubClient = func() (*commit.GitHubClient, error) {
+		return commit.NewGitHubClient("abcde", srv.URL), nil
 	}
 	t.Cleanup(func() { newAdminGitHubClient = newAdminGitHubClientReal })
 	t.Setenv("CONBENCH_DB_URL", pool.Config().ConnString())

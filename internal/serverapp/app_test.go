@@ -1,6 +1,12 @@
 package serverapp
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -50,6 +56,38 @@ func TestLoadConfigFallsBackToDatabaseURL(t *testing.T) {
 	assert.Equal(t, "postgres://fallback/db", cfg.databaseURL)
 }
 
+func TestLoadConfigPreservesCommitAuthenticationModes(t *testing.T) {
+	t.Run("zero mode", func(t *testing.T) {
+		isolateLoadConfigEnv(t)
+		t.Setenv("CONBENCH_DB_URL", "postgres://db/conbench")
+
+		cfg, err := loadConfig()
+
+		require.NoError(t, err)
+		assert.Nil(t, cfg.githubClient)
+	})
+
+	t.Run("complete app mode", func(t *testing.T) {
+		isolateLoadConfigEnv(t)
+		t.Setenv("CONBENCH_DB_URL", "postgres://db/conbench")
+		key, err := rsa.GenerateKey(rand.Reader, 2048)
+		require.NoError(t, err)
+		keyFile := filepath.Join(t.TempDir(), "app.pem")
+		require.NoError(t, os.WriteFile(keyFile, pem.EncodeToMemory(&pem.Block{
+			Type:  "RSA PRIVATE KEY",
+			Bytes: x509.MarshalPKCS1PrivateKey(key),
+		}), 0o600))
+		t.Setenv("CONBENCH_COMMIT_GITHUB_APP_ID", "12345")
+		t.Setenv("CONBENCH_COMMIT_GITHUB_APP_INSTALLATION_ID", "42")
+		t.Setenv("CONBENCH_COMMIT_GITHUB_APP_PRIVATE_KEY_FILE", keyFile)
+
+		cfg, err := loadConfig()
+
+		require.NoError(t, err)
+		assert.NotNil(t, cfg.githubClient)
+	})
+}
+
 func isolateLoadConfigEnv(t *testing.T) {
 	t.Helper()
 	for _, key := range []string{
@@ -61,6 +99,9 @@ func isolateLoadConfigEnv(t *testing.T) {
 		"CONBENCH_WEB_BASE_URL",
 		"CONBENCH_STATIC_ADMIN_TOKEN",
 		"GITHUB_API_TOKEN",
+		"CONBENCH_COMMIT_GITHUB_APP_ID",
+		"CONBENCH_COMMIT_GITHUB_APP_INSTALLATION_ID",
+		"CONBENCH_COMMIT_GITHUB_APP_PRIVATE_KEY_FILE",
 	} {
 		t.Setenv(key, "")
 	}

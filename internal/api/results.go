@@ -86,8 +86,7 @@ func (h *Handler) submit(ctx context.Context, in *SubmitInput) (*SubmitOutput, e
 		if errors.Is(err, service.ErrSubmissionConflict) {
 			return nil, huma.Error409Conflict("submission key already exists with different content")
 		}
-		var ve *service.ValidationError
-		if errors.As(err, &ve) {
+		if ve, ok := errors.AsType[*service.ValidationError](err); ok {
 			return nil, huma.Error422UnprocessableEntity(ve.Message)
 		}
 		return nil, err // unexpected: huma maps to 500

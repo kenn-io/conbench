@@ -26,28 +26,62 @@ const maxResponseBytes = 8 << 20
 // rotation and bounded retry behavior (commit.py:836-995). Stdlib only.
 // Safe for concurrent use: the rotating token index is atomic.
 type GitHubClient struct {
-	baseURL string
-	httpc   *http.Client
-	tokens  []string
-	cur     atomic.Int64 // rotating index into tokens
+	baseURL     string
+	httpc       *http.Client
+	tokens      []string
+	tokenSource GitHubTokenSource
+	cur         atomic.Int64 // rotating index into tokens
+}
+
+// GitHubTokenSource supplies renewable credentials to the commit client.
+type GitHubTokenSource interface {
+	Token(context.Context) (string, error)
+	Invalidate(rejectedToken string)
 }
 
 // errQuotaExhausted is the permanent failure after every token in the pool hit
 // its hourly quota (legacy commit.py:973).
 var errQuotaExhausted = errors.New("github API quota exhausted across token pool")
 
+var errUnauthorized = errors.New("github API unauthorized")
+
+type unauthorizedError struct {
+	requestURL string
+	token      string
+	body       string
+}
+
+func (e *unauthorizedError) Error() string {
+	return fmt.Sprintf("unexpected github response 401 for %s: %.150s", e.requestURL, e.body)
+}
+
+func (e *unauthorizedError) Unwrap() error { return errUnauthorized }
+
 // NewGitHubClient builds a client from the GITHUB_API_TOKEN env value
 // (comma-separated tokens, whitespace-trimmed, length-sanity-filtered like
 // legacy commit.py:575-631; empty means unauthenticated). baseURL "" means the
 // live GitHub API; tests pass an httptest URL.
 func NewGitHubClient(tokenEnv, baseURL string) *GitHubClient {
+	client := newGitHubClient(baseURL)
+	client.tokens = parseTokenEnv(tokenEnv)
+	return client
+}
+
+// NewGitHubClientWithTokenSource builds a client that asks source for a
+// credential before each request.
+func NewGitHubClientWithTokenSource(source GitHubTokenSource, baseURL string) *GitHubClient {
+	client := newGitHubClient(baseURL)
+	client.tokenSource = source
+	return client
+}
+
+func newGitHubClient(baseURL string) *GitHubClient {
 	if baseURL == "" {
 		baseURL = defaultGitHubBaseURL
 	}
 	return &GitHubClient{
 		baseURL: baseURL,
 		httpc:   &http.Client{Timeout: 30 * time.Second},
-		tokens:  parseTokenEnv(tokenEnv),
 	}
 }
 
@@ -246,6 +280,7 @@ func isoZ(t time.Time) string {
 // commit.py:944-973: rotate and retry until rotations exceed the pool size.
 func (c *GitHubClient) getJSON(ctx context.Context, u string, out any) error {
 	rotations := 0
+	refreshedSource := false
 	for attempt := 1; ; attempt++ {
 		body, retryable, err := c.attempt(ctx, u, &rotations)
 		if err == nil {
@@ -253,6 +288,12 @@ func (c *GitHubClient) getJSON(ctx context.Context, u string, out any) error {
 				return fmt.Errorf("decode github response for %s: %w", u, uerr)
 			}
 			return nil
+		}
+		var unauthorized *unauthorizedError
+		if errors.As(err, &unauthorized) && c.tokenSource != nil && !refreshedSource {
+			c.tokenSource.Invalidate(unauthorized.token)
+			refreshedSource = true
+			continue
 		}
 		if !retryable {
 			return err
@@ -274,7 +315,11 @@ func (c *GitHubClient) attempt(ctx context.Context, u string, rotations *int) (b
 	if err != nil {
 		return nil, false, fmt.Errorf("build github request: %w", err)
 	}
-	if tok := c.token(); tok != "" {
+	tok, err := c.token(ctx)
+	if err != nil {
+		return nil, false, fmt.Errorf("get github authentication token: %w", err)
+	}
+	if tok != "" {
 		req.Header.Set("Authorization", "Bearer "+tok)
 	}
 	resp, err := c.httpc.Do(req)
@@ -290,6 +335,8 @@ func (c *GitHubClient) attempt(ctx context.Context, u string, rotations *int) (b
 	switch {
 	case resp.StatusCode == http.StatusOK:
 		return body, false, nil
+	case resp.StatusCode == http.StatusUnauthorized:
+		return nil, false, &unauthorizedError{requestURL: u, token: tok, body: string(body)}
 	case resp.StatusCode == http.StatusForbidden:
 		retryable, ferr := c.handle403(resp, rotations)
 		return nil, retryable, ferr
@@ -301,11 +348,14 @@ func (c *GitHubClient) attempt(ctx context.Context, u string, rotations *int) (b
 }
 
 // token returns the current auth token, or "" when unauthenticated.
-func (c *GitHubClient) token() string {
-	if len(c.tokens) == 0 {
-		return ""
+func (c *GitHubClient) token(ctx context.Context) (string, error) {
+	if c.tokenSource != nil {
+		return c.tokenSource.Token(ctx)
 	}
-	return c.tokens[int(c.cur.Load())%len(c.tokens)]
+	if len(c.tokens) == 0 {
+		return "", nil
+	}
+	return c.tokens[int(c.cur.Load())%len(c.tokens)], nil
 }
 
 // handle403 decides whether a 403 is retryable. Quota exhausted (remaining: 0)

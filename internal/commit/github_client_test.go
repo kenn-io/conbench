@@ -2,10 +2,17 @@ package commit
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -13,7 +20,27 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/conbench/conbench/internal/commit/githubtest"
+	"github.com/conbench/conbench/internal/githubapi"
 )
+
+type renewableTestTokenSource struct {
+	mu    sync.Mutex
+	token string
+}
+
+func (s *renewableTestTokenSource) Token(context.Context) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.token, nil
+}
+
+func (s *renewableTestTokenSource) Invalidate(rejectedToken string) {
+	s.mu.Lock()
+	if s.token == rejectedToken {
+		s.token = "fresh"
+	}
+	s.mu.Unlock()
+}
 
 func TestParseTokenEnv(t *testing.T) {
 	cases := map[string][]string{
@@ -132,6 +159,113 @@ func TestClientPermanentErrorNoRetry(t *testing.T) {
 	_, err := c.commitInfo(context.Background(), "org/repo", "gone")
 	require.Error(t, err)
 	assert.Len(t, srv.Requests(), 1, "404 is permanent, no retry")
+}
+
+func TestClientRefreshesTokenSourceOnceAfterUnauthorized(t *testing.T) {
+	var authorizations []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authorizations = append(authorizations, r.Header.Get("Authorization"))
+		if len(authorizations) == 1 {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		_, _ = w.Write([]byte(`{"fork":false,"owner":{"login":"org"},"default_branch":"main"}`))
+	}))
+	t.Cleanup(server.Close)
+
+	source := &renewableTestTokenSource{token: "expired"}
+	client := NewGitHubClientWithTokenSource(source, server.URL)
+	branch, err := client.defaultBranch(context.Background(), "org/repo")
+
+	require.NoError(t, err)
+	assert.Equal(t, "org:main", branch)
+	assert.Equal(t, []string{"Bearer expired", "Bearer fresh"}, authorizations)
+}
+
+func TestClientStopsAfterSecondUnauthorizedFromTokenSource(t *testing.T) {
+	var authorizations []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authorizations = append(authorizations, r.Header.Get("Authorization"))
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	t.Cleanup(server.Close)
+
+	source := &renewableTestTokenSource{token: "expired"}
+	client := NewGitHubClientWithTokenSource(source, server.URL)
+	_, err := client.defaultBranch(context.Background(), "org/repo")
+
+	require.Error(t, err)
+	assert.Equal(t, []string{"Bearer expired", "Bearer fresh"}, authorizations)
+}
+
+func TestClientConcurrentUnauthorizedResponsesDoNotEvictRefreshedToken(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	privateKey := string(pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(key),
+	}))
+
+	var exchanges atomic.Int32
+	var oldRequests atomic.Int32
+	bothOldRequestsArrived := make(chan struct{})
+	refreshedTokenMinted := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/app/installations/42/access_tokens":
+			exchange := exchanges.Add(1)
+			if exchange == 2 {
+				close(refreshedTokenMinted)
+			}
+			_, _ = fmt.Fprintf(w, `{"token":"token-%d","expires_at":"2030-08-26T14:00:00Z"}`, exchange)
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/org/repo":
+			switch r.Header.Get("Authorization") {
+			case "Bearer token-1":
+				request := oldRequests.Add(1)
+				if request == 2 {
+					close(bothOldRequestsArrived)
+				}
+				if request == 1 {
+					<-bothOldRequestsArrived
+				} else {
+					<-refreshedTokenMinted
+				}
+				w.WriteHeader(http.StatusUnauthorized)
+			default:
+				_, _ = w.Write([]byte(`{"fork":false,"owner":{"login":"org"},"default_branch":"main"}`))
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	source, err := githubapi.NewAppTokenSource(githubapi.AppTokenSourceConfig{
+		AppID:          "12345",
+		InstallationID: 42,
+		AppPrivateKey:  privateKey,
+		BaseURL:        server.URL,
+		HTTPClient:     server.Client(),
+	})
+	require.NoError(t, err)
+	client := NewGitHubClientWithTokenSource(source, server.URL)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	errs := make(chan error, 2)
+	var wg sync.WaitGroup
+	for range 2 {
+		wg.Go(func() {
+			_, branchErr := client.defaultBranch(ctx, "org/repo")
+			errs <- branchErr
+		})
+	}
+	wg.Wait()
+	close(errs)
+	for branchErr := range errs {
+		require.NoError(t, branchErr)
+	}
+	assert.Equal(t, int32(2), exchanges.Load())
 }
 
 func TestClientBudgetExceeded(t *testing.T) {

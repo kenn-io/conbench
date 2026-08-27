@@ -56,6 +56,7 @@ spec:
               name: conbench-config
           - secretRef:
               name: conbench-secret
+        # {{CONBENCH_GITHUB_APP_VOLUME_MOUNTS}}
         resources:
           requests:
             # Note(JP): these are so small to allow for deployment rollover on
@@ -91,4 +92,5 @@ spec:
           periodSeconds: 10
           successThreshold: 1
           timeoutSeconds: 5
+      # {{CONBENCH_GITHUB_APP_VOLUMES}}
       terminationGracePeriodSeconds: 60

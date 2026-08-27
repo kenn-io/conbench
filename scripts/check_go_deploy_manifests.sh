@@ -20,10 +20,14 @@ export DB_HOST="postgres.example"
 export DB_PORT="5432"
 
 render_prod_deployment="$tmp/prod-deployment.yml"
+render_app_deployment="$tmp/app-deployment.yml"
 render_prod_migration="$tmp/prod-migration.yml"
 render_prod_ingress="$tmp/prod-ingress.yml"
 render_config="$tmp/config.yml"
+github_app_key_file="$tmp/github-app-private-key.pem"
 failures=0
+
+printf '%s\n' 'test-github-app-private-key' > "$github_app_key_file"
 
 export CONBENCH_DEPLOY_NO_DISPATCH=1
 . "$root/scripts/go_deploy_runtime.sh"
@@ -38,6 +42,15 @@ record_failure() {
 if ! render_deployment_manifest > "$render_prod_deployment"; then
 	record_failure "failed to render production deployment manifest"
 	: > "$render_prod_deployment"
+fi
+if ! (
+	export CONBENCH_COMMIT_GITHUB_APP_ID='12345'
+	export CONBENCH_COMMIT_GITHUB_APP_INSTALLATION_ID='42'
+	export CONBENCH_COMMIT_GITHUB_APP_PRIVATE_KEY_FILE="$github_app_key_file"
+	render_deployment_manifest
+) > "$render_app_deployment"; then
+	record_failure "failed to render GitHub App deployment manifest"
+	: > "$render_app_deployment"
 fi
 if ! render_migration_manifest > "$render_prod_migration"; then
 	record_failure "failed to render production migration manifest"
@@ -254,6 +267,24 @@ require_key_sets_equal() {
 	fi
 }
 
+require_log_order() {
+	local file="$1"
+	local first="$2"
+	local second="$3"
+	if ! python3 - "$file" "$first" "$second" <<'PY'
+import sys
+
+lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+first = next((i for i, line in enumerate(lines) if sys.argv[2] in line), None)
+second = next((i for i, line in enumerate(lines) if sys.argv[3] in line), None)
+if first is None or second is None or first >= second:
+    raise SystemExit(1)
+PY
+	then
+		record_failure "unexpected command order in $file: $first before $second"
+	fi
+}
+
 require_service_apply_before_ingress_branch() {
 	local file="$1"
 	if ! python3 - "$file" <<'PY'
@@ -296,10 +327,18 @@ render_secret_case() {
 		export CONBENCH_INTENDED_BASE_URL='https://conbench.example.com'
 		unset CONBENCH_OIDC_ISSUER_URL CONBENCH_OIDC_CLIENT_ID CONBENCH_OIDC_CLIENT_SECRET
 		unset CONBENCH_SESSION_SECRET GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET
+		unset CONBENCH_COMMIT_GITHUB_APP_ID CONBENCH_COMMIT_GITHUB_APP_INSTALLATION_ID
+		unset CONBENCH_COMMIT_GITHUB_APP_PRIVATE_KEY_FILE
 		case "$profile" in
 			no_oidc) ;;
 			no_github)
 				unset GITHUB_API_TOKEN
+				;;
+			github_app)
+				unset GITHUB_API_TOKEN
+				export CONBENCH_COMMIT_GITHUB_APP_ID='12345'
+				export CONBENCH_COMMIT_GITHUB_APP_INSTALLATION_ID='42'
+				export CONBENCH_COMMIT_GITHUB_APP_PRIVATE_KEY_FILE="$github_app_key_file"
 				;;
 			google_oidc)
 				export GOOGLE_CLIENT_ID='legacy-client'
@@ -338,6 +377,86 @@ render_secret_case() {
 	) > "$outfile"
 }
 
+render_github_app_key_case() {
+	local outfile="$1"
+	(
+		export CONBENCH_COMMIT_GITHUB_APP_ID='12345'
+		export CONBENCH_COMMIT_GITHUB_APP_INSTALLATION_ID='42'
+		export CONBENCH_COMMIT_GITHUB_APP_PRIVATE_KEY_FILE="$github_app_key_file"
+		render_github_app_secret_manifest
+	) > "$outfile"
+}
+
+exercise_deploy_secrets_case() {
+	local outfile="$1"
+	local profile="$2"
+	(
+		export DB_PASSWORD='pa:ss/word'
+		export DB_USERNAME='conbench-user'
+		export DB_NAME='conbench'
+		export DB_HOST='postgres.example'
+		export DB_PORT='5432'
+		export CONBENCH_API_TOKEN='dummy-static-token'
+		export CONBENCH_INTENDED_BASE_URL='https://conbench.example.com'
+		export EKS_CLUSTER='cluster.example'
+		export NAMESPACE='default'
+		unset CONBENCH_COMMIT_GITHUB_APP_ID CONBENCH_COMMIT_GITHUB_APP_INSTALLATION_ID
+		unset CONBENCH_COMMIT_GITHUB_APP_PRIVATE_KEY_FILE
+		case "$profile" in
+			static)
+			export GITHUB_API_TOKEN='dummy-github-token'
+			;;
+			github_app)
+			unset GITHUB_API_TOKEN
+			export CONBENCH_COMMIT_GITHUB_APP_ID='12345'
+			export CONBENCH_COMMIT_GITHUB_APP_INSTALLATION_ID='42'
+			export CONBENCH_COMMIT_GITHUB_APP_PRIVATE_KEY_FILE="$github_app_key_file"
+			;;
+		esac
+		aws() {
+			printf 'aws %s\n' "$*" >> "$outfile"
+		}
+		kubectl() {
+			printf 'kubectl %s\n' "$*" >> "$outfile"
+			if [[ "$1" == apply ]]; then
+				command cat >/dev/null
+			fi
+		}
+		deploy_secrets_and_config
+	)
+}
+
+exercise_runtime_deploy_case() {
+	local outfile="$1"
+	(
+		export EKS_CLUSTER='cluster.example'
+		export NAMESPACE='default'
+		aws() {
+			printf 'aws %s\n' "$*" >> "$outfile"
+		}
+		render_deployment_manifest() {
+			printf '%s\n' 'apiVersion: apps/v1' 'kind: Deployment' 'metadata:' '  name: conbench-deployment'
+		}
+		apply_service_monitor_if_supported() {
+			printf '%s\n' 'service monitor handled' >> "$outfile"
+		}
+		kubectl() {
+			if [[ "$*" == 'apply -f -' ]]; then
+				local payload
+				payload=$(command cat)
+				if grep -Fq 'kind: Deployment' <<< "$payload"; then
+					printf '%s\n' 'kubectl apply deployment/conbench-deployment' >> "$outfile"
+				else
+					printf '%s\n' 'kubectl apply stdin' >> "$outfile"
+				fi
+				return
+			fi
+			printf 'kubectl %s\n' "$*" >> "$outfile"
+		}
+		deploy
+	) >/dev/null 2>&1
+}
+
 require_missing "$root/cmd/conbench-server"
 
 require_absent "$render_prod_deployment" "gunicorn"
@@ -356,10 +475,14 @@ require_contains "$render_prod_deployment" "containerPort: 8080"
 require_contains "$render_prod_deployment" "startupProbe:"
 require_contains "$render_prod_deployment" "livenessProbe:"
 require_contains "$render_prod_deployment" "readinessProbe:"
+require_absent "$render_prod_deployment" "conbench-github-app-key"
 require_line "$render_prod_deployment" '^[[:space:]]*path:[[:space:]]*/api/ping$'
 require_contains "$render_prod_deployment" "port: http"
 require_absent "$render_prod_deployment" "{{"
 require_yaml_kinds "$render_prod_deployment" "Deployment"
+require_contains "$render_app_deployment" "mountPath: /var/run/secrets/conbench-github-app"
+require_contains "$render_app_deployment" "secretName: conbench-github-app-key"
+require_yaml_kinds "$render_app_deployment" "Deployment"
 
 require_yaml_kinds "$root/k8s/conbench-service.yml" "Service"
 require_line "$root/k8s/conbench-service-monitor.yml" '^[[:space:]]*path:[[:space:]]*/metrics$'
@@ -405,6 +528,32 @@ require_missing "$root/k8s/conbench-grafana-dashboard-configmap.template.yml"
 require_missing "$root/k8s/kube-prometheus/conbench-grafana-dashboard.json"
 require_missing "$root/k8s/kube-prometheus"
 
+static_deploy_log="$tmp/static-deploy.log"
+if exercise_deploy_secrets_case "$static_deploy_log" static; then
+	require_contains "$static_deploy_log" "kubectl delete secret conbench-github-app-key --ignore-not-found=true"
+	require_absent "$static_deploy_log" "kubectl rollout restart deployment/conbench-deployment"
+else
+	record_failure "static secret deployment exercise failed"
+fi
+
+github_app_deploy_log="$tmp/github-app-deploy.log"
+if exercise_deploy_secrets_case "$github_app_deploy_log" github_app; then
+	require_absent "$github_app_deploy_log" "kubectl delete secret conbench-github-app-key"
+	require_absent "$github_app_deploy_log" "kubectl rollout restart deployment/conbench-deployment"
+else
+	record_failure "GitHub App secret deployment exercise failed"
+fi
+
+runtime_deploy_log="$tmp/runtime-deploy.log"
+if exercise_runtime_deploy_case "$runtime_deploy_log"; then
+	require_contains "$runtime_deploy_log" "kubectl rollout restart deployment/conbench-deployment"
+	require_log_order "$runtime_deploy_log" \
+		"kubectl apply deployment/conbench-deployment" \
+		"kubectl rollout restart deployment/conbench-deployment"
+else
+	record_failure "runtime deployment exercise failed"
+fi
+
 secret_no_oidc="$tmp/secret-no-oidc.json"
 if render_secret_case "$secret_no_oidc" no_oidc; then
 	require_secret_key "$secret_no_oidc" "CONBENCH_DB_URL"
@@ -426,6 +575,24 @@ if render_secret_case "$secret_no_github" no_github; then
 	require_secret_value "$secret_no_github" "GITHUB_API_TOKEN" ""
 else
 	record_failure "no-GitHub-token secret render failed"
+fi
+
+secret_github_app="$tmp/secret-github-app.json"
+if render_secret_case "$secret_github_app" github_app; then
+	require_secret_absent_key "$secret_github_app" "GITHUB_API_TOKEN"
+	require_secret_value "$secret_github_app" "CONBENCH_COMMIT_GITHUB_APP_ID" "12345"
+	require_secret_value "$secret_github_app" "CONBENCH_COMMIT_GITHUB_APP_INSTALLATION_ID" "42"
+	require_secret_value "$secret_github_app" "CONBENCH_COMMIT_GITHUB_APP_PRIVATE_KEY_FILE" "/var/run/secrets/conbench-github-app/private-key.pem"
+else
+	record_failure "GitHub App runtime secret render failed"
+fi
+
+github_app_key_secret="$tmp/github-app-key-secret.json"
+if render_github_app_key_case "$github_app_key_secret"; then
+	require_secret_value "$github_app_key_secret" "private-key.pem" "test-github-app-private-key
+"
+else
+	record_failure "GitHub App private-key secret render failed"
 fi
 
 secret_google_oidc="$tmp/secret-google-oidc.json"

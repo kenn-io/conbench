@@ -96,6 +96,29 @@ sys.stdout.write(text)
 PY
 }
 
+github_app_commit_auth_configured() {
+  [[ -n "${CONBENCH_COMMIT_GITHUB_APP_ID:-}" || -n "${CONBENCH_COMMIT_GITHUB_APP_INSTALLATION_ID:-}" || -n "${CONBENCH_COMMIT_GITHUB_APP_PRIVATE_KEY_FILE:-}" ]]
+}
+
+validate_github_app_commit_auth() {
+  github_app_commit_auth_configured || return 0
+  local key
+  for key in CONBENCH_COMMIT_GITHUB_APP_ID CONBENCH_COMMIT_GITHUB_APP_INSTALLATION_ID CONBENCH_COMMIT_GITHUB_APP_PRIVATE_KEY_FILE; do
+    if [[ -z "${!key:-}" ]]; then
+      echo "GitHub App commit authentication requires $key" >&2
+      return 1
+    fi
+  done
+  if [[ -n "${GITHUB_API_TOKEN:-}" ]]; then
+    echo "GitHub App commit authentication cannot be combined with GITHUB_API_TOKEN" >&2
+    return 1
+  fi
+  if [[ ! -r "${CONBENCH_COMMIT_GITHUB_APP_PRIVATE_KEY_FILE}" ]]; then
+    echo "CONBENCH_COMMIT_GITHUB_APP_PRIVATE_KEY_FILE must name a readable file" >&2
+    return 1
+  fi
+}
+
 render_secret_manifest() {
   local restore_xtrace=0
   case "$-" in
@@ -132,10 +155,14 @@ render_secret_manifest() {
   fi
 
   local session_secret oidc_issuer oidc_client_id oidc_client_secret oidc_enabled
+  local github_app_id github_app_installation_id github_app_private_key_file github_app_enabled
   session_secret="${CONBENCH_SESSION_SECRET:-}"
   oidc_issuer="${CONBENCH_OIDC_ISSUER_URL:-}"
   oidc_client_id="${CONBENCH_OIDC_CLIENT_ID:-${GOOGLE_CLIENT_ID:-}}"
   oidc_client_secret="${CONBENCH_OIDC_CLIENT_SECRET:-${GOOGLE_CLIENT_SECRET:-}}"
+  github_app_id="${CONBENCH_COMMIT_GITHUB_APP_ID:-}"
+  github_app_installation_id="${CONBENCH_COMMIT_GITHUB_APP_INSTALLATION_ID:-}"
+  github_app_private_key_file="${CONBENCH_COMMIT_GITHUB_APP_PRIVATE_KEY_FILE:-}"
   if [[ -z "$oidc_issuer" && -n "${GOOGLE_CLIENT_ID:-}" && -n "${GOOGLE_CLIENT_SECRET:-}" ]]; then
     oidc_issuer="https://accounts.google.com"
   fi
@@ -162,6 +189,17 @@ render_secret_manifest() {
     fi
   fi
 
+  github_app_enabled=0
+  if github_app_commit_auth_configured; then
+    github_app_enabled=1
+    if ! validate_github_app_commit_auth; then
+      if ((restore_xtrace)); then
+        set -x
+      fi
+      return 1
+    fi
+  fi
+
   local render_status
   CONBENCH_DB_URL_RENDERED="$conbench_db_url" \
   OIDC_ENABLED="$oidc_enabled" \
@@ -169,6 +207,9 @@ render_secret_manifest() {
   OIDC_CLIENT_ID_RENDERED="$oidc_client_id" \
   OIDC_CLIENT_SECRET_RENDERED="$oidc_client_secret" \
   CONBENCH_SESSION_SECRET_RENDERED="$session_secret" \
+  GITHUB_APP_ENABLED="$github_app_enabled" \
+  GITHUB_APP_ID_RENDERED="$github_app_id" \
+  GITHUB_APP_INSTALLATION_ID_RENDERED="$github_app_installation_id" \
   python3 <<'PY'
 import base64
 import json
@@ -178,8 +219,18 @@ import sys
 data = {
     "CONBENCH_DB_URL": os.environ["CONBENCH_DB_URL_RENDERED"],
     "CONBENCH_API_TOKEN": os.environ.get("CONBENCH_API_TOKEN", ""),
-    "GITHUB_API_TOKEN": os.environ.get("GITHUB_API_TOKEN", ""),
 }
+
+if os.environ["GITHUB_APP_ENABLED"] == "1":
+    data.update(
+        {
+            "CONBENCH_COMMIT_GITHUB_APP_ID": os.environ["GITHUB_APP_ID_RENDERED"],
+            "CONBENCH_COMMIT_GITHUB_APP_INSTALLATION_ID": os.environ["GITHUB_APP_INSTALLATION_ID_RENDERED"],
+            "CONBENCH_COMMIT_GITHUB_APP_PRIVATE_KEY_FILE": "/var/run/secrets/conbench-github-app/private-key.pem",
+        }
+    )
+else:
+    data["GITHUB_API_TOKEN"] = os.environ.get("GITHUB_API_TOKEN", "")
 
 if os.environ["OIDC_ENABLED"] == "1":
     data.update(
@@ -217,6 +268,36 @@ PY
   return "$render_status"
 }
 
+render_github_app_secret_manifest() {
+  local private_key_file="${CONBENCH_COMMIT_GITHUB_APP_PRIVATE_KEY_FILE:-}"
+  if ! github_app_commit_auth_configured; then
+    echo "complete GitHub App commit authentication is required to render its private-key secret" >&2
+    return 1
+  fi
+  validate_github_app_commit_auth || return 1
+
+  python3 - "$private_key_file" <<'PY'
+import base64
+import json
+import pathlib
+import sys
+
+private_key = pathlib.Path(sys.argv[1]).read_bytes()
+json.dump(
+    {
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {"name": "conbench-github-app-key"},
+        "type": "Opaque",
+        "data": {"private-key.pem": base64.b64encode(private_key).decode()},
+    },
+    sys.stdout,
+    separators=(",", ":"),
+)
+sys.stdout.write("\n")
+PY
+}
+
 render_config_manifest() {
   python3 <<'PY'
 import json
@@ -246,7 +327,27 @@ PY
 }
 
 render_deployment_manifest() {
-  render_template_from_env k8s/conbench-deployment.templ.yml CONBENCH_SERVER_IMAGE_SPEC
+  local github_app_volume_mounts github_app_volumes
+  if github_app_commit_auth_configured; then
+    validate_github_app_commit_auth || return 1
+    github_app_volume_mounts='
+        volumeMounts:
+          - name: conbench-github-app-key
+            mountPath: /var/run/secrets/conbench-github-app
+            readOnly: true'
+    github_app_volumes='
+      volumes:
+        - name: conbench-github-app-key
+          secret:
+            secretName: conbench-github-app-key'
+  else
+    github_app_volume_mounts='GitHub App key mount disabled.'
+    github_app_volumes='GitHub App key volume disabled.'
+  fi
+  CONBENCH_GITHUB_APP_VOLUME_MOUNTS="$github_app_volume_mounts" \
+  CONBENCH_GITHUB_APP_VOLUMES="$github_app_volumes" \
+    render_template_from_env k8s/conbench-deployment.templ.yml \
+      CONBENCH_SERVER_IMAGE_SPEC CONBENCH_GITHUB_APP_VOLUME_MOUNTS CONBENCH_GITHUB_APP_VOLUMES
 }
 
 render_migration_manifest() {
@@ -297,6 +398,11 @@ deploy_secrets_and_config() {
   kubectl config set-context --current --namespace="${NAMESPACE}"
 
   render_secret_manifest | kubectl apply -f - || return 1
+  if github_app_commit_auth_configured; then
+    render_github_app_secret_manifest | kubectl apply -f - || return 1
+  else
+    kubectl delete secret conbench-github-app-key --ignore-not-found=true || return 1
+  fi
   render_config_manifest | kubectl apply -f - || return 1
 }
 
@@ -342,6 +448,7 @@ deploy() {
 
   # (Re-)apply deployment using the image tagged by CONBENCH_DEPLOY_VERSION.
   render_deployment_manifest | kubectl apply -f - || return 1
+  kubectl rollout restart deployment/conbench-deployment || return 1
   kubectl apply -f k8s/conbench-service.yml || return 1
   apply_service_monitor_if_supported || return 1
 

@@ -119,8 +119,7 @@ func parsePositiveReportFloat(raw optionalFloatParam, fallback float64, field st
 }
 
 func mapCIReportError(err error) error {
-	var ve *service.ValidationError
-	if errors.As(err, &ve) {
+	if ve, ok := errors.AsType[*service.ValidationError](err); ok {
 		return huma.Error422UnprocessableEntity(ve.Message)
 	}
 	if errors.Is(err, service.ErrNotFound) {

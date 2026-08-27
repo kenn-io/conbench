@@ -42,6 +42,21 @@ type Client struct {
 	httpc   *http.Client
 }
 
+// HTTPStatusError reports a non-success response from the GitHub API.
+type HTTPStatusError struct {
+	method     string
+	path       string
+	statusCode int
+	body       string
+}
+
+func (e *HTTPStatusError) Error() string {
+	return fmt.Sprintf("github %s %s returned HTTP %d: %s", e.method, e.path, e.statusCode, e.body)
+}
+
+// StatusCode returns the GitHub HTTP response status.
+func (e *HTTPStatusError) StatusCode() int { return e.statusCode }
+
 // CheckRunRequest is the payload for POST /repos/{owner}/{repo}/check-runs.
 type CheckRunRequest struct {
 	Name        string         `json:"name"`
@@ -240,7 +255,9 @@ func (c *Client) doJSON(ctx context.Context, method, path string, in any, out an
 		return fmt.Errorf("read github response: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("github %s %s returned HTTP %d: %s", method, path, resp.StatusCode, strings.TrimSpace(string(raw)))
+		return &HTTPStatusError{
+			method: method, path: path, statusCode: resp.StatusCode, body: strings.TrimSpace(string(raw)),
+		}
 	}
 	if out == nil {
 		return nil
@@ -256,6 +273,10 @@ func encodeAppJWT(appID string, privateKey string, now time.Time) (string, error
 	if err != nil {
 		return "", err
 	}
+	return encodeAppJWTWithKey(appID, key, now)
+}
+
+func encodeAppJWTWithKey(appID string, key *rsa.PrivateKey, now time.Time) (string, error) {
 	header := map[string]string{"alg": "RS256", "typ": "JWT"}
 	claims := map[string]any{
 		"iss": strings.TrimSpace(appID),
