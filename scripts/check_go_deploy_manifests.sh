@@ -23,7 +23,10 @@ render_prod_deployment="$tmp/prod-deployment.yml"
 render_prod_migration="$tmp/prod-migration.yml"
 render_prod_ingress="$tmp/prod-ingress.yml"
 render_config="$tmp/config.yml"
+github_app_key_file="$tmp/github-app-private-key.pem"
 failures=0
+
+printf '%s\n' 'test-github-app-private-key' > "$github_app_key_file"
 
 export CONBENCH_DEPLOY_NO_DISPATCH=1
 . "$root/scripts/go_deploy_runtime.sh"
@@ -296,10 +299,18 @@ render_secret_case() {
 		export CONBENCH_INTENDED_BASE_URL='https://conbench.example.com'
 		unset CONBENCH_OIDC_ISSUER_URL CONBENCH_OIDC_CLIENT_ID CONBENCH_OIDC_CLIENT_SECRET
 		unset CONBENCH_SESSION_SECRET GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET
+		unset CONBENCH_COMMIT_GITHUB_APP_ID CONBENCH_COMMIT_GITHUB_APP_INSTALLATION_ID
+		unset CONBENCH_COMMIT_GITHUB_APP_PRIVATE_KEY_FILE
 		case "$profile" in
 			no_oidc) ;;
 			no_github)
 				unset GITHUB_API_TOKEN
+				;;
+			github_app)
+				unset GITHUB_API_TOKEN
+				export CONBENCH_COMMIT_GITHUB_APP_ID='12345'
+				export CONBENCH_COMMIT_GITHUB_APP_INSTALLATION_ID='42'
+				export CONBENCH_COMMIT_GITHUB_APP_PRIVATE_KEY_FILE="$github_app_key_file"
 				;;
 			google_oidc)
 				export GOOGLE_CLIENT_ID='legacy-client'
@@ -338,6 +349,16 @@ render_secret_case() {
 	) > "$outfile"
 }
 
+render_github_app_key_case() {
+	local outfile="$1"
+	(
+		export CONBENCH_COMMIT_GITHUB_APP_ID='12345'
+		export CONBENCH_COMMIT_GITHUB_APP_INSTALLATION_ID='42'
+		export CONBENCH_COMMIT_GITHUB_APP_PRIVATE_KEY_FILE="$github_app_key_file"
+		render_github_app_secret_manifest
+	) > "$outfile"
+}
+
 require_missing "$root/cmd/conbench-server"
 
 require_absent "$render_prod_deployment" "gunicorn"
@@ -356,6 +377,9 @@ require_contains "$render_prod_deployment" "containerPort: 8080"
 require_contains "$render_prod_deployment" "startupProbe:"
 require_contains "$render_prod_deployment" "livenessProbe:"
 require_contains "$render_prod_deployment" "readinessProbe:"
+require_contains "$render_prod_deployment" "mountPath: /var/run/secrets/conbench-github-app"
+require_contains "$render_prod_deployment" "secretName: conbench-github-app-key"
+require_contains "$render_prod_deployment" "optional: true"
 require_line "$render_prod_deployment" '^[[:space:]]*path:[[:space:]]*/api/ping$'
 require_contains "$render_prod_deployment" "port: http"
 require_absent "$render_prod_deployment" "{{"
@@ -426,6 +450,24 @@ if render_secret_case "$secret_no_github" no_github; then
 	require_secret_value "$secret_no_github" "GITHUB_API_TOKEN" ""
 else
 	record_failure "no-GitHub-token secret render failed"
+fi
+
+secret_github_app="$tmp/secret-github-app.json"
+if render_secret_case "$secret_github_app" github_app; then
+	require_secret_absent_key "$secret_github_app" "GITHUB_API_TOKEN"
+	require_secret_value "$secret_github_app" "CONBENCH_COMMIT_GITHUB_APP_ID" "12345"
+	require_secret_value "$secret_github_app" "CONBENCH_COMMIT_GITHUB_APP_INSTALLATION_ID" "42"
+	require_secret_value "$secret_github_app" "CONBENCH_COMMIT_GITHUB_APP_PRIVATE_KEY_FILE" "/var/run/secrets/conbench-github-app/private-key.pem"
+else
+	record_failure "GitHub App runtime secret render failed"
+fi
+
+github_app_key_secret="$tmp/github-app-key-secret.json"
+if render_github_app_key_case "$github_app_key_secret"; then
+	require_secret_value "$github_app_key_secret" "private-key.pem" "test-github-app-private-key
+"
+else
+	record_failure "GitHub App private-key secret render failed"
 fi
 
 secret_google_oidc="$tmp/secret-google-oidc.json"

@@ -56,6 +56,10 @@ spec:
               name: conbench-config
           - secretRef:
               name: conbench-secret
+        volumeMounts:
+          - name: conbench-github-app-key
+            mountPath: /var/run/secrets/conbench-github-app
+            readOnly: true
         resources:
           requests:
             # Note(JP): these are so small to allow for deployment rollover on
@@ -91,4 +95,9 @@ spec:
           periodSeconds: 10
           successThreshold: 1
           timeoutSeconds: 5
+      volumes:
+        - name: conbench-github-app-key
+          secret:
+            secretName: conbench-github-app-key
+            optional: true
       terminationGracePeriodSeconds: 60
