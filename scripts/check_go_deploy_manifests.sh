@@ -20,6 +20,7 @@ export DB_HOST="postgres.example"
 export DB_PORT="5432"
 
 render_prod_deployment="$tmp/prod-deployment.yml"
+render_app_deployment="$tmp/app-deployment.yml"
 render_prod_migration="$tmp/prod-migration.yml"
 render_prod_ingress="$tmp/prod-ingress.yml"
 render_config="$tmp/config.yml"
@@ -41,6 +42,15 @@ record_failure() {
 if ! render_deployment_manifest > "$render_prod_deployment"; then
 	record_failure "failed to render production deployment manifest"
 	: > "$render_prod_deployment"
+fi
+if ! (
+	export CONBENCH_COMMIT_GITHUB_APP_ID='12345'
+	export CONBENCH_COMMIT_GITHUB_APP_INSTALLATION_ID='42'
+	export CONBENCH_COMMIT_GITHUB_APP_PRIVATE_KEY_FILE="$github_app_key_file"
+	render_deployment_manifest
+) > "$render_app_deployment"; then
+	record_failure "failed to render GitHub App deployment manifest"
+	: > "$render_app_deployment"
 fi
 if ! render_migration_manifest > "$render_prod_migration"; then
 	record_failure "failed to render production migration manifest"
@@ -359,6 +369,45 @@ render_github_app_key_case() {
 	) > "$outfile"
 }
 
+exercise_deploy_secrets_case() {
+	local outfile="$1"
+	local profile="$2"
+	(
+		export DB_PASSWORD='pa:ss/word'
+		export DB_USERNAME='conbench-user'
+		export DB_NAME='conbench'
+		export DB_HOST='postgres.example'
+		export DB_PORT='5432'
+		export CONBENCH_API_TOKEN='dummy-static-token'
+		export CONBENCH_INTENDED_BASE_URL='https://conbench.example.com'
+		export EKS_CLUSTER='cluster.example'
+		export NAMESPACE='default'
+		unset CONBENCH_COMMIT_GITHUB_APP_ID CONBENCH_COMMIT_GITHUB_APP_INSTALLATION_ID
+		unset CONBENCH_COMMIT_GITHUB_APP_PRIVATE_KEY_FILE
+		case "$profile" in
+			static)
+			export GITHUB_API_TOKEN='dummy-github-token'
+			;;
+			github_app)
+			unset GITHUB_API_TOKEN
+			export CONBENCH_COMMIT_GITHUB_APP_ID='12345'
+			export CONBENCH_COMMIT_GITHUB_APP_INSTALLATION_ID='42'
+			export CONBENCH_COMMIT_GITHUB_APP_PRIVATE_KEY_FILE="$github_app_key_file"
+			;;
+		esac
+		aws() {
+			printf 'aws %s\n' "$*" >> "$outfile"
+		}
+		kubectl() {
+			printf 'kubectl %s\n' "$*" >> "$outfile"
+			if [[ "$1" == apply ]]; then
+				command cat >/dev/null
+			fi
+		}
+		deploy_secrets_and_config
+	)
+}
+
 require_missing "$root/cmd/conbench-server"
 
 require_absent "$render_prod_deployment" "gunicorn"
@@ -377,13 +426,14 @@ require_contains "$render_prod_deployment" "containerPort: 8080"
 require_contains "$render_prod_deployment" "startupProbe:"
 require_contains "$render_prod_deployment" "livenessProbe:"
 require_contains "$render_prod_deployment" "readinessProbe:"
-require_contains "$render_prod_deployment" "mountPath: /var/run/secrets/conbench-github-app"
-require_contains "$render_prod_deployment" "secretName: conbench-github-app-key"
-require_contains "$render_prod_deployment" "optional: true"
+require_absent "$render_prod_deployment" "conbench-github-app-key"
 require_line "$render_prod_deployment" '^[[:space:]]*path:[[:space:]]*/api/ping$'
 require_contains "$render_prod_deployment" "port: http"
 require_absent "$render_prod_deployment" "{{"
 require_yaml_kinds "$render_prod_deployment" "Deployment"
+require_contains "$render_app_deployment" "mountPath: /var/run/secrets/conbench-github-app"
+require_contains "$render_app_deployment" "secretName: conbench-github-app-key"
+require_yaml_kinds "$render_app_deployment" "Deployment"
 
 require_yaml_kinds "$root/k8s/conbench-service.yml" "Service"
 require_line "$root/k8s/conbench-service-monitor.yml" '^[[:space:]]*path:[[:space:]]*/metrics$'
@@ -428,6 +478,22 @@ require_service_apply_before_ingress_branch "$root/scripts/go_deploy_runtime.sh"
 require_missing "$root/k8s/conbench-grafana-dashboard-configmap.template.yml"
 require_missing "$root/k8s/kube-prometheus/conbench-grafana-dashboard.json"
 require_missing "$root/k8s/kube-prometheus"
+
+static_deploy_log="$tmp/static-deploy.log"
+if exercise_deploy_secrets_case "$static_deploy_log" static; then
+	require_contains "$static_deploy_log" "kubectl delete secret conbench-github-app-key --ignore-not-found=true"
+	require_contains "$static_deploy_log" "kubectl rollout restart deployment/conbench-deployment"
+else
+	record_failure "static secret deployment exercise failed"
+fi
+
+github_app_deploy_log="$tmp/github-app-deploy.log"
+if exercise_deploy_secrets_case "$github_app_deploy_log" github_app; then
+	require_absent "$github_app_deploy_log" "kubectl delete secret conbench-github-app-key"
+	require_contains "$github_app_deploy_log" "kubectl rollout restart deployment/conbench-deployment"
+else
+	record_failure "GitHub App secret deployment exercise failed"
+fi
 
 secret_no_oidc="$tmp/secret-no-oidc.json"
 if render_secret_case "$secret_no_oidc" no_oidc; then

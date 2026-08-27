@@ -96,6 +96,29 @@ sys.stdout.write(text)
 PY
 }
 
+github_app_commit_auth_configured() {
+  [[ -n "${CONBENCH_COMMIT_GITHUB_APP_ID:-}" || -n "${CONBENCH_COMMIT_GITHUB_APP_INSTALLATION_ID:-}" || -n "${CONBENCH_COMMIT_GITHUB_APP_PRIVATE_KEY_FILE:-}" ]]
+}
+
+validate_github_app_commit_auth() {
+  github_app_commit_auth_configured || return 0
+  local key
+  for key in CONBENCH_COMMIT_GITHUB_APP_ID CONBENCH_COMMIT_GITHUB_APP_INSTALLATION_ID CONBENCH_COMMIT_GITHUB_APP_PRIVATE_KEY_FILE; do
+    if [[ -z "${!key:-}" ]]; then
+      echo "GitHub App commit authentication requires $key" >&2
+      return 1
+    fi
+  done
+  if [[ -n "${GITHUB_API_TOKEN:-}" ]]; then
+    echo "GitHub App commit authentication cannot be combined with GITHUB_API_TOKEN" >&2
+    return 1
+  fi
+  if [[ ! -r "${CONBENCH_COMMIT_GITHUB_APP_PRIVATE_KEY_FILE}" ]]; then
+    echo "CONBENCH_COMMIT_GITHUB_APP_PRIVATE_KEY_FILE must name a readable file" >&2
+    return 1
+  fi
+}
+
 render_secret_manifest() {
   local restore_xtrace=0
   case "$-" in
@@ -167,26 +190,9 @@ render_secret_manifest() {
   fi
 
   github_app_enabled=0
-  if [[ -n "$github_app_id" || -n "$github_app_installation_id" || -n "$github_app_private_key_file" ]]; then
+  if github_app_commit_auth_configured; then
     github_app_enabled=1
-    for key in CONBENCH_COMMIT_GITHUB_APP_ID CONBENCH_COMMIT_GITHUB_APP_INSTALLATION_ID CONBENCH_COMMIT_GITHUB_APP_PRIVATE_KEY_FILE; do
-      if [[ -z "${!key:-}" ]]; then
-        echo "GitHub App commit authentication requires $key" >&2
-        if ((restore_xtrace)); then
-          set -x
-        fi
-        return 1
-      fi
-    done
-    if [[ -n "${GITHUB_API_TOKEN:-}" ]]; then
-      echo "GitHub App commit authentication cannot be combined with GITHUB_API_TOKEN" >&2
-      if ((restore_xtrace)); then
-        set -x
-      fi
-      return 1
-    fi
-    if [[ ! -r "$github_app_private_key_file" ]]; then
-      echo "CONBENCH_COMMIT_GITHUB_APP_PRIVATE_KEY_FILE must name a readable file" >&2
+    if ! validate_github_app_commit_auth; then
       if ((restore_xtrace)); then
         set -x
       fi
@@ -264,14 +270,11 @@ PY
 
 render_github_app_secret_manifest() {
   local private_key_file="${CONBENCH_COMMIT_GITHUB_APP_PRIVATE_KEY_FILE:-}"
-  if [[ -z "${CONBENCH_COMMIT_GITHUB_APP_ID:-}" || -z "${CONBENCH_COMMIT_GITHUB_APP_INSTALLATION_ID:-}" || -z "$private_key_file" ]]; then
+  if ! github_app_commit_auth_configured; then
     echo "complete GitHub App commit authentication is required to render its private-key secret" >&2
     return 1
   fi
-  if [[ ! -r "$private_key_file" ]]; then
-    echo "CONBENCH_COMMIT_GITHUB_APP_PRIVATE_KEY_FILE must name a readable file" >&2
-    return 1
-  fi
+  validate_github_app_commit_auth || return 1
 
   python3 - "$private_key_file" <<'PY'
 import base64
@@ -324,7 +327,27 @@ PY
 }
 
 render_deployment_manifest() {
-  render_template_from_env k8s/conbench-deployment.templ.yml CONBENCH_SERVER_IMAGE_SPEC
+  local github_app_volume_mounts github_app_volumes
+  if github_app_commit_auth_configured; then
+    validate_github_app_commit_auth || return 1
+    github_app_volume_mounts='
+        volumeMounts:
+          - name: conbench-github-app-key
+            mountPath: /var/run/secrets/conbench-github-app
+            readOnly: true'
+    github_app_volumes='
+      volumes:
+        - name: conbench-github-app-key
+          secret:
+            secretName: conbench-github-app-key'
+  else
+    github_app_volume_mounts='GitHub App key mount disabled.'
+    github_app_volumes='GitHub App key volume disabled.'
+  fi
+  CONBENCH_GITHUB_APP_VOLUME_MOUNTS="$github_app_volume_mounts" \
+  CONBENCH_GITHUB_APP_VOLUMES="$github_app_volumes" \
+    render_template_from_env k8s/conbench-deployment.templ.yml \
+      CONBENCH_SERVER_IMAGE_SPEC CONBENCH_GITHUB_APP_VOLUME_MOUNTS CONBENCH_GITHUB_APP_VOLUMES
 }
 
 render_migration_manifest() {
@@ -375,10 +398,15 @@ deploy_secrets_and_config() {
   kubectl config set-context --current --namespace="${NAMESPACE}"
 
   render_secret_manifest | kubectl apply -f - || return 1
-  if [[ -n "${CONBENCH_COMMIT_GITHUB_APP_ID:-}" || -n "${CONBENCH_COMMIT_GITHUB_APP_INSTALLATION_ID:-}" || -n "${CONBENCH_COMMIT_GITHUB_APP_PRIVATE_KEY_FILE:-}" ]]; then
+  if github_app_commit_auth_configured; then
     render_github_app_secret_manifest | kubectl apply -f - || return 1
+  else
+    kubectl delete secret conbench-github-app-key --ignore-not-found=true || return 1
   fi
   render_config_manifest | kubectl apply -f - || return 1
+  if kubectl get deployment conbench-deployment >/dev/null 2>&1; then
+    kubectl rollout restart deployment/conbench-deployment || return 1
+  fi
 }
 
 run_migrations() {

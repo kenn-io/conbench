@@ -217,6 +217,10 @@ func recordFailure(summary *Summary, candidate storage.UnknownCommitCandidate, e
 }
 
 func isGitHubAuthOrQuotaFailure(err error) bool {
+	var statusError interface{ StatusCode() int }
+	if errors.As(err, &statusError) && (statusError.StatusCode() == 401 || statusError.StatusCode() == 403) {
+		return true
+	}
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "unexpected github response 401") ||
 		strings.Contains(msg, "unexpected github response 403") ||
